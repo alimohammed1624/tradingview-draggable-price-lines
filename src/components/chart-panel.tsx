@@ -101,7 +101,6 @@ export function ChartPanel({ onPriceChange }: ChartPanelProps = {}) {
       onPriceChangeRef.current?.(tick.price);
       const bar = aggregator.applyTick(tick);
       seriesRef.current?.update(bar as CandlestickData<Time>);
-      chartRef.current?.timeScale().scrollToRealTime();
     });
 
     const handleResize = () => {
