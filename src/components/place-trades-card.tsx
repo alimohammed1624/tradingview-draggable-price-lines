@@ -44,12 +44,26 @@ function clampPrice(value: number): number {
 
 type Side = "buy" | "sell";
 
+export type TradeLog = {
+  id: number;
+  timestamp: number;
+  side: Side;
+  lots: number;
+  entryPrice: number;
+  stopLoss: number | null;
+  takeProfit: number | null;
+};
+
 export type PlaceTradesCardProps = {
   /** TradingView chart's current live price; current price field is disabled and read-only and shows this value */
   livePrice?: number;
+  /** Callback when a trade is placed */
+  onTradePlaced?: (trade: TradeLog) => void;
+  /** List of placed trades to display */
+  trades?: TradeLog[];
 };
 
-export function PlaceTradesCard({ livePrice }: PlaceTradesCardProps = {}) {
+export function PlaceTradesCard({ livePrice, onTradePlaced, trades = [] }: PlaceTradesCardProps = {}) {
   const [lots, setLots] = React.useState(0.1);
   const [side, setSide] = React.useState<Side>("buy");
   const [currentPrice, setCurrentPrice] = React.useState(1.0);
@@ -102,6 +116,20 @@ export function PlaceTradesCard({ livePrice }: PlaceTradesCardProps = {}) {
         ? ((price - effectivePrice) / effectivePrice) * 100
         : ((effectivePrice - price) / effectivePrice) * 100;
     setTpPercent(Math.min(clampPercent(pct), tpPercentMax));
+  };
+
+  const handlePlaceTrade = () => {
+    const now = Date.now();
+    const trade: TradeLog = {
+      id: now,
+      timestamp: now,
+      side,
+      lots,
+      entryPrice: effectivePrice,
+      stopLoss: slTpEnabled ? slPrice : null,
+      takeProfit: slTpEnabled ? tpPrice : null,
+    };
+    onTradePlaced?.(trade);
   };
 
   return (
@@ -284,9 +312,34 @@ export function PlaceTradesCard({ livePrice }: PlaceTradesCardProps = {}) {
         )}
       </CardContent>
       <CardFooter className="flex flex-col gap-2">
-        <Button type="button" className="w-full">
+        <Button type="button" className="w-full" onClick={handlePlaceTrade}>
           {actionLabel}
         </Button>
+        {trades.length > 0 && (
+          <div className="w-full mt-4 space-y-2">
+            <div className="text-xs font-medium text-muted-foreground">Recent Trades</div>
+            <div className="space-y-1.5 max-h-[200px] overflow-y-auto">
+              {trades.slice().reverse().map((trade) => (
+                <div key={trade.id} className="text-xs p-2 rounded border border-border bg-muted/30">
+                  <div className="flex items-center justify-between">
+                    <span className={cn(
+                      "font-semibold uppercase",
+                      trade.side === "buy" ? "text-green-600 dark:text-green-500" : "text-red-600 dark:text-red-500"
+                    )}>
+                      {trade.side}
+                    </span>
+                    <span className="text-muted-foreground">{trade.lots} lots</span>
+                  </div>
+                  <div className="mt-1 space-y-0.5 text-muted-foreground">
+                    <div>Entry: {trade.entryPrice.toFixed(5)}</div>
+                    {trade.stopLoss && <div>SL: {trade.stopLoss.toFixed(5)}</div>}
+                    {trade.takeProfit && <div>TP: {trade.takeProfit.toFixed(5)}</div>}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
       </CardFooter>
     </Card>
   );
