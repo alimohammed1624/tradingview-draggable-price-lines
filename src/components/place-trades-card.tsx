@@ -24,7 +24,7 @@ import * as React from "react";
 
 const TRADE_COLORS = [
   "#3b82f6", // blue
-  "#10b981", // green
+  "#a855f7", // purple (changed from green)
   "#f59e0b", // amber
   "#8b5cf6", // violet
   "#ec4899", // pink
@@ -85,6 +85,10 @@ export type PlaceTradesCardProps = {
   onTradeVisibilityChange?: (tradeId: number, visible: boolean) => void;
   /** Callback when preview trade changes */
   onPreviewTradeChange?: (preview: PreviewTrade | null) => void;
+  /** Registers the SL price drag handler */
+  onSlDragHandlerReady?: (handler: (price: number) => void) => void;
+  /** Registers the TP price drag handler */
+  onTpDragHandlerReady?: (handler: (price: number) => void) => void;
 };
 
 export function PlaceTradesCard({ 
@@ -92,7 +96,9 @@ export function PlaceTradesCard({
   onTradePlaced, 
   trades = [], 
   onTradeVisibilityChange,
-  onPreviewTradeChange 
+  onPreviewTradeChange,
+  onSlDragHandlerReady,
+  onTpDragHandlerReady
 }: PlaceTradesCardProps = {}) {
   const [lots, setLots] = React.useState(0.1);
   const [side, setSide] = React.useState<Side>("buy");
@@ -142,24 +148,35 @@ export function PlaceTradesCard({
     });
   }, [effectivePrice, slPrice, tpPrice, slTpEnabled, livePrice, onPreviewTradeChange]);
 
-  const actionLabel = `${side === "buy" ? "BUY" : "SELL"} ${lotsDisplay} ${lotsLabel}${slTpEnabled ? ` [SL: ${slPrice.toFixed(4)}, TP: ${tpPrice.toFixed(4)}]` : ""}`;
-
-  const setSlPercentFromPrice = (price: number) => {
+  const setSlPercentFromPrice = React.useCallback((price: number) => {
     if (effectivePrice <= 0) return;
     const pct =
       side === "buy"
         ? ((effectivePrice - price) / effectivePrice) * 100
         : ((price - effectivePrice) / effectivePrice) * 100;
     setSlPercent(Math.min(clampPercent(pct), slPercentMax));
-  };
-  const setTpPercentFromPrice = (price: number) => {
+  }, [effectivePrice, side, slPercentMax]);
+
+  const setTpPercentFromPrice = React.useCallback((price: number) => {
     if (effectivePrice <= 0) return;
     const pct =
       side === "buy"
         ? ((price - effectivePrice) / effectivePrice) * 100
         : ((effectivePrice - price) / effectivePrice) * 100;
     setTpPercent(Math.min(clampPercent(pct), tpPercentMax));
-  };
+  }, [effectivePrice, side, tpPercentMax]);
+
+  // Register SL price drag handler with parent
+  React.useEffect(() => {
+    onSlDragHandlerReady?.(setSlPercentFromPrice);
+  }, [onSlDragHandlerReady, setSlPercentFromPrice]);
+
+  // Register TP price drag handler with parent
+  React.useEffect(() => {
+    onTpDragHandlerReady?.(setTpPercentFromPrice);
+  }, [onTpDragHandlerReady, setTpPercentFromPrice]);
+
+  const actionLabel = `${side === "buy" ? "BUY" : "SELL"} ${lotsDisplay} ${lotsLabel}${slTpEnabled ? ` [SL: ${slPrice.toFixed(4)}, TP: ${tpPrice.toFixed(4)}]` : ""}`;
 
   const handlePlaceTrade = () => {
     const now = Date.now();

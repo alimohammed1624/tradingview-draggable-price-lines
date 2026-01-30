@@ -49,9 +49,13 @@ export type ChartPanelProps = {
   trades?: TradeLog[];
   /** Preview trade to display with solid lines */
   previewTrade?: PreviewTrade | null;
+  /** Callback when SL preview line is dragged */
+  onSlPriceDrag?: (price: number) => void;
+  /** Callback when TP preview line is dragged */
+  onTpPriceDrag?: (price: number) => void;
 };
 
-export function ChartPanel({ onPriceChange, trades = [], previewTrade = null }: ChartPanelProps = {}) {
+export function ChartPanel({ onPriceChange, trades = [], previewTrade = null, onSlPriceDrag, onTpPriceDrag }: ChartPanelProps = {}) {
   const chartContainerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const seriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
@@ -59,6 +63,14 @@ export function ChartPanel({ onPriceChange, trades = [], previewTrade = null }: 
   const previewLinesRef = useRef<IPriceLine[]>([]);
   const onPriceChangeRef = useRef(onPriceChange);
   onPriceChangeRef.current = onPriceChange;
+  
+  // Drag state refs
+  const isDraggingRef = useRef(false);
+  const dragTargetRef = useRef<"sl" | "tp" | null>(null);
+  const onSlPriceDragRef = useRef(onSlPriceDrag);
+  const onTpPriceDragRef = useRef(onTpPriceDrag);
+  onSlPriceDragRef.current = onSlPriceDrag;
+  onTpPriceDragRef.current = onTpPriceDrag;
 
   useEffect(() => {
     const container = chartContainerRef.current;
@@ -112,6 +124,132 @@ export function ChartPanel({ onPriceChange, trades = [], previewTrade = null }: 
       seriesRef.current?.update(bar as CandlestickData<Time>);
     });
 
+    // Drag threshold in pixels
+    const DRAG_THRESHOLD = 8;
+
+    // Helper to set cursor on container and all inner elements
+    const setCursor = (cursor: string) => {
+      container.style.cursor = cursor;
+      const innerElements = container.querySelectorAll('canvas, table, td');
+      innerElements.forEach((el) => {
+        (el as HTMLElement).style.cursor = cursor;
+      });
+    };
+
+    // Helper to check if Y coordinate is near a price line
+    const isNearPriceLine = (mouseY: number, price: number | null): boolean => {
+      if (price === null || !seriesRef.current) return false;
+      const lineY = seriesRef.current.priceToCoordinate(price);
+      if (lineY === null) return false;
+      return Math.abs(mouseY - lineY) <= DRAG_THRESHOLD;
+    };
+
+    // Mouse down handler to start dragging
+    const handleMouseDown = (e: MouseEvent) => {
+      if (!seriesRef.current || !chartContainerRef.current) return;
+      
+      const rect = chartContainerRef.current.getBoundingClientRect();
+      const mouseY = e.clientY - rect.top;
+      
+      // Get current preview line prices from refs
+      const previewLines = previewLinesRef.current;
+      if (previewLines.length === 0) return;
+      
+      // Check SL line (index 0) and TP line (index 1)
+      const slLine = previewLines[0];
+      const tpLine = previewLines[1];
+      
+      const slPrice = slLine?.options().price ?? null;
+      const tpPrice = tpLine?.options().price ?? null;
+      
+      if (slPrice !== null && isNearPriceLine(mouseY, slPrice)) {
+        isDraggingRef.current = true;
+        dragTargetRef.current = "sl";
+        setCursor("ns-resize");
+        // Disable chart scroll/scale during drag
+        chart.applyOptions({
+          handleScroll: false,
+          handleScale: false,
+        });
+        e.preventDefault();
+        e.stopPropagation();
+      } else if (tpPrice !== null && isNearPriceLine(mouseY, tpPrice)) {
+        isDraggingRef.current = true;
+        dragTargetRef.current = "tp";
+        setCursor("ns-resize");
+        // Disable chart scroll/scale during drag
+        chart.applyOptions({
+          handleScroll: false,
+          handleScale: false,
+        });
+        e.preventDefault();
+        e.stopPropagation();
+      }
+    };
+
+    // Mouse move handler for dragging and hover cursor
+    const handleMouseMove = (e: MouseEvent) => {
+      if (!seriesRef.current || !chartContainerRef.current) return;
+      
+      const rect = chartContainerRef.current.getBoundingClientRect();
+      const mouseY = e.clientY - rect.top;
+      
+      if (isDraggingRef.current && dragTargetRef.current) {
+        // Convert Y coordinate to price
+        const newPrice = seriesRef.current.coordinateToPrice(mouseY);
+        if (newPrice !== null) {
+          if (dragTargetRef.current === "sl") {
+            onSlPriceDragRef.current?.(newPrice as number);
+          } else if (dragTargetRef.current === "tp") {
+            onTpPriceDragRef.current?.(newPrice as number);
+          }
+        }
+      } else {
+        // Update cursor based on hover
+        const previewLines = previewLinesRef.current;
+        if (previewLines.length === 0) {
+          setCursor("");
+          return;
+        }
+        
+        const slLine = previewLines[0];
+        const tpLine = previewLines[1];
+        const slPrice = slLine?.options().price ?? null;
+        const tpPrice = tpLine?.options().price ?? null;
+        
+        if (isNearPriceLine(mouseY, slPrice) || isNearPriceLine(mouseY, tpPrice)) {
+          setCursor("ns-resize");
+        } else {
+          setCursor("");
+        }
+      }
+    };
+
+    // Mouse up handler to stop dragging
+    const handleMouseUp = () => {
+      if (isDraggingRef.current) {
+        isDraggingRef.current = false;
+        dragTargetRef.current = null;
+        // Re-enable chart scroll/scale after drag
+        chart.applyOptions({
+          handleScroll: true,
+          handleScale: true,
+        });
+        setCursor("");
+      }
+    };
+
+    // Mouse leave handler to stop dragging when leaving chart
+    const handleMouseLeave = () => {
+      handleMouseUp();
+      setCursor("");
+    };
+
+    container.addEventListener("mousedown", handleMouseDown);
+    container.addEventListener("mousemove", handleMouseMove);
+    container.addEventListener("mouseup", handleMouseUp);
+    container.addEventListener("mouseleave", handleMouseLeave);
+
     const handleResize = () => {
       if (chartContainerRef.current && chartRef.current) {
         chartRef.current.applyOptions({
@@ -131,6 +269,12 @@ export function ChartPanel({ onPriceChange, trades = [], previewTrade = null }: 
       stream.stop();
       resizeObserver.disconnect();
       window.removeEventListener("resize", handleResize);
+      
+      // Cleanup drag event listeners
+      container.removeEventListener("mousedown", handleMouseDown);
+      container.removeEventListener("mousemove", handleMouseMove);
+      container.removeEventListener("mouseup", handleMouseUp);
+      container.removeEventListener("mouseleave", handleMouseLeave);
       
       // Cleanup all price lines
       priceLinesRef.current.forEach((lines) => {
@@ -243,25 +387,12 @@ export function ChartPanel({ onPriceChange, trades = [], previewTrade = null }: 
     // Add new preview lines if preview trade exists
     if (previewTrade) {
       const newLines: IPriceLine[] = [];
-      const previewColor = "#808080"; // Gray color for preview
 
-      // Entry line (solid)
-      const entryLine = series.createPriceLine({
-        price: previewTrade.entryPrice,
-        color: previewColor,
-        lineWidth: 2,
-        lineStyle: LineStyle.Solid,
-        lineVisible: true,
-        axisLabelVisible: true,
-        title: "Entry (Preview)",
-      });
-      newLines.push(entryLine);
-
-      // Stop loss line (solid)
+      // Stop loss line (solid) - Green
       if (previewTrade.stopLoss !== null) {
         const slLine = series.createPriceLine({
           price: previewTrade.stopLoss,
-          color: previewColor,
+          color: "#10b981", // Green for SL
           lineWidth: 2,
           lineStyle: LineStyle.Solid,
           lineVisible: true,
@@ -271,11 +402,11 @@ export function ChartPanel({ onPriceChange, trades = [], previewTrade = null }: 
         newLines.push(slLine);
       }
 
-      // Take profit line (solid)
+      // Take profit line (solid) - Red
       if (previewTrade.takeProfit !== null) {
         const tpLine = series.createPriceLine({
           price: previewTrade.takeProfit,
-          color: previewColor,
+          color: "#ef4444", // Red for TP
           lineWidth: 2,
           lineStyle: LineStyle.Solid,
           lineVisible: true,

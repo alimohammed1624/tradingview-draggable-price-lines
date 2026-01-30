@@ -5,12 +5,16 @@ import {
   ResizablePanel,
   ResizablePanelGroup,
 } from "@/components/ui/resizable";
-import { useState } from "react";
+import { useState, useRef } from "react";
 
 export function App() {
   const [livePrice, setLivePrice] = useState<number | undefined>(undefined);
   const [trades, setTrades] = useState<TradeLog[]>([]);
   const [previewTrade, setPreviewTrade] = useState<PreviewTrade | null>(null);
+  
+  // Refs to store the drag handlers from PlaceTradesCard
+  const slDragHandlerRef = useRef<((price: number) => void) | null>(null);
+  const tpDragHandlerRef = useRef<((price: number) => void) | null>(null);
 
   const handleTradePlaced = (trade: TradeLog) => {
     console.log("Trade placed:", trade);
@@ -33,6 +37,8 @@ export function App() {
             onPriceChange={setLivePrice} 
             trades={trades} 
             previewTrade={previewTrade}
+            onSlPriceDrag={(price) => slDragHandlerRef.current?.(price)}
+            onTpPriceDrag={(price) => tpDragHandlerRef.current?.(price)}
           />
         </ResizablePanel>
         <ResizableHandle withHandle />
@@ -43,6 +49,8 @@ export function App() {
               onTradePlaced={handleTradePlaced}
               onTradeVisibilityChange={handleTradeVisibilityChange}
               onPreviewTradeChange={setPreviewTrade}
+              onSlDragHandlerReady={(handler) => { slDragHandlerRef.current = handler; }}
+              onTpDragHandlerReady={(handler) => { tpDragHandlerRef.current = handler; }}
               trades={trades}
             />
           </div>
