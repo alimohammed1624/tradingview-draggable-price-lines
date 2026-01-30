@@ -3,12 +3,15 @@ import {
   createMockForexStream,
   generateInitialM5Bars,
 } from "@/lib/mock-forex-stream";
+import type { TradeLog, PreviewTrade } from "@/components/place-trades-card";
 import {
   CandlestickSeries,
   ColorType,
   createChart,
+  LineStyle,
   type CandlestickData,
   type IChartApi,
+  type IPriceLine,
   type ISeriesApi,
   type Time,
 } from "lightweight-charts";
@@ -42,12 +45,18 @@ function getChartColors(): {
 export type ChartPanelProps = {
   /** Called with the chart's current live price on each tick (and with initial last close when ready). */
   onPriceChange?: (price: number) => void;
+  /** List of trades to display as price lines */
+  trades?: TradeLog[];
+  /** Preview trade to display with solid lines */
+  previewTrade?: PreviewTrade | null;
 };
 
-export function ChartPanel({ onPriceChange }: ChartPanelProps = {}) {
+export function ChartPanel({ onPriceChange, trades = [], previewTrade = null }: ChartPanelProps = {}) {
   const chartContainerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const seriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
+  const priceLinesRef = useRef<Map<number, IPriceLine[]>>(new Map());
+  const previewLinesRef = useRef<IPriceLine[]>([]);
   const onPriceChangeRef = useRef(onPriceChange);
   onPriceChangeRef.current = onPriceChange;
 
@@ -122,11 +131,163 @@ export function ChartPanel({ onPriceChange }: ChartPanelProps = {}) {
       stream.stop();
       resizeObserver.disconnect();
       window.removeEventListener("resize", handleResize);
+      
+      // Cleanup all price lines
+      priceLinesRef.current.forEach((lines) => {
+        lines.forEach((line) => {
+          seriesRef.current?.removePriceLine(line);
+        });
+      });
+      priceLinesRef.current.clear();
+      
+      // Cleanup preview lines
+      previewLinesRef.current.forEach((line) => {
+        seriesRef.current?.removePriceLine(line);
+      });
+      previewLinesRef.current = [];
+      
       chart.remove();
       chartRef.current = null;
       seriesRef.current = null;
     };
   }, []);
+
+  // Sync price lines with trades
+  useEffect(() => {
+    const series = seriesRef.current;
+    if (!series) return;
+
+    const currentLines = priceLinesRef.current;
+    const tradeIds = new Set(trades.map((t) => t.id));
+
+    // Remove price lines for deleted trades
+    currentLines.forEach((lines, tradeId) => {
+      if (!tradeIds.has(tradeId)) {
+        lines.forEach((line) => series.removePriceLine(line));
+        currentLines.delete(tradeId);
+      }
+    });
+
+    // Add or update price lines for each trade
+    trades.forEach((trade) => {
+      const existingLines = currentLines.get(trade.id);
+
+      if (existingLines) {
+        // Update existing price lines visibility
+        const [entryLine, slLine, tpLine] = existingLines;
+        entryLine.applyOptions({ lineVisible: trade.visible, axisLabelVisible: trade.visible });
+        if (slLine) slLine.applyOptions({ lineVisible: trade.visible, axisLabelVisible: trade.visible });
+        if (tpLine) tpLine.applyOptions({ lineVisible: trade.visible, axisLabelVisible: trade.visible });
+      } else {
+        // Create new price lines
+        const lines: IPriceLine[] = [];
+
+        // Entry line
+        const entryLine = series.createPriceLine({
+          price: trade.entryPrice,
+          color: trade.color,
+          lineWidth: 2,
+          lineStyle: LineStyle.Dotted,
+          lineVisible: trade.visible,
+          axisLabelVisible: true,
+          title: "Entry",
+        });
+        lines.push(entryLine);
+
+        // Stop loss line
+        if (trade.stopLoss !== null) {
+          const slLine = series.createPriceLine({
+            price: trade.stopLoss,
+            color: trade.color,
+            lineWidth: 2,
+            lineStyle: LineStyle.Dotted,
+            lineVisible: trade.visible,
+            axisLabelVisible: true,
+            title: "SL",
+          });
+          lines.push(slLine);
+        }
+
+        // Take profit line
+        if (trade.takeProfit !== null) {
+          const tpLine = series.createPriceLine({
+            price: trade.takeProfit,
+            color: trade.color,
+            lineWidth: 2,
+            lineStyle: LineStyle.Dotted,
+            lineVisible: trade.visible,
+            axisLabelVisible: true,
+            title: "TP",
+          });
+          lines.push(tpLine);
+        }
+
+        currentLines.set(trade.id, lines);
+      }
+    });
+  }, [trades]);
+
+  // Sync preview trade lines
+  useEffect(() => {
+    const series = seriesRef.current;
+    if (!series) return;
+
+    const currentPreviewLines = previewLinesRef.current;
+    
+    // Remove existing preview lines
+    currentPreviewLines.forEach((line) => {
+      series.removePriceLine(line);
+    });
+    previewLinesRef.current = [];
+
+    // Add new preview lines if preview trade exists
+    if (previewTrade) {
+      const newLines: IPriceLine[] = [];
+      const previewColor = "#808080"; // Gray color for preview
+
+      // Entry line (solid)
+      const entryLine = series.createPriceLine({
+        price: previewTrade.entryPrice,
+        color: previewColor,
+        lineWidth: 2,
+        lineStyle: LineStyle.Solid,
+        lineVisible: true,
+        axisLabelVisible: true,
+        title: "Entry (Preview)",
+      });
+      newLines.push(entryLine);
+
+      // Stop loss line (solid)
+      if (previewTrade.stopLoss !== null) {
+        const slLine = series.createPriceLine({
+          price: previewTrade.stopLoss,
+          color: previewColor,
+          lineWidth: 2,
+          lineStyle: LineStyle.Solid,
+          lineVisible: true,
+          axisLabelVisible: true,
+          title: "SL (Preview)",
+        });
+        newLines.push(slLine);
+      }
+
+      // Take profit line (solid)
+      if (previewTrade.takeProfit !== null) {
+        const tpLine = series.createPriceLine({
+          price: previewTrade.takeProfit,
+          color: previewColor,
+          lineWidth: 2,
+          lineStyle: LineStyle.Solid,
+          lineVisible: true,
+          axisLabelVisible: true,
+          title: "TP (Preview)",
+        });
+        newLines.push(tpLine);
+      }
+
+      previewLinesRef.current = newLines;
+    }
+  }, [previewTrade]);
 
   return <div ref={chartContainerRef} className="h-full w-full" />;
 }

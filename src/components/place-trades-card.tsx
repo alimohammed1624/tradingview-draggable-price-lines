@@ -18,8 +18,20 @@ import {
 } from "@/components/ui/input-group";
 import { Label } from "@/components/ui/label";
 import { Slider } from "@/components/ui/slider";
+import { Switch } from "@/components/ui/switch";
 import { cn } from "@/lib/utils";
 import * as React from "react";
+
+const TRADE_COLORS = [
+  "#3b82f6", // blue
+  "#10b981", // green
+  "#f59e0b", // amber
+  "#8b5cf6", // violet
+  "#ec4899", // pink
+  "#06b6d4", // cyan
+  "#f97316", // orange
+  "#6366f1", // indigo
+];
 
 const LOTS_MIN = 0.1;
 const LOTS_MAX = 5;
@@ -52,6 +64,14 @@ export type TradeLog = {
   entryPrice: number;
   stopLoss: number | null;
   takeProfit: number | null;
+  color: string;
+  visible: boolean;
+};
+
+export type PreviewTrade = {
+  entryPrice: number;
+  stopLoss: number | null;
+  takeProfit: number | null;
 };
 
 export type PlaceTradesCardProps = {
@@ -61,9 +81,19 @@ export type PlaceTradesCardProps = {
   onTradePlaced?: (trade: TradeLog) => void;
   /** List of placed trades to display */
   trades?: TradeLog[];
+  /** Callback when trade visibility is toggled */
+  onTradeVisibilityChange?: (tradeId: number, visible: boolean) => void;
+  /** Callback when preview trade changes */
+  onPreviewTradeChange?: (preview: PreviewTrade | null) => void;
 };
 
-export function PlaceTradesCard({ livePrice, onTradePlaced, trades = [] }: PlaceTradesCardProps = {}) {
+export function PlaceTradesCard({ 
+  livePrice, 
+  onTradePlaced, 
+  trades = [], 
+  onTradeVisibilityChange,
+  onPreviewTradeChange 
+}: PlaceTradesCardProps = {}) {
   const [lots, setLots] = React.useState(0.1);
   const [side, setSide] = React.useState<Side>("buy");
   const [currentPrice, setCurrentPrice] = React.useState(1.0);
@@ -99,6 +129,19 @@ export function PlaceTradesCard({ livePrice, onTradePlaced, trades = [] }: Place
     if (tpPercent > tpPercentMax) setTpPercent(tpPercentMax);
   }, [side]);
 
+  // Update preview trade whenever relevant state changes
+  React.useEffect(() => {
+    if (livePrice === undefined) {
+      onPreviewTradeChange?.(null);
+      return;
+    }
+    onPreviewTradeChange?.({
+      entryPrice: effectivePrice,
+      stopLoss: slTpEnabled ? slPrice : null,
+      takeProfit: slTpEnabled ? tpPrice : null,
+    });
+  }, [effectivePrice, slPrice, tpPrice, slTpEnabled, livePrice, onPreviewTradeChange]);
+
   const actionLabel = `${side === "buy" ? "BUY" : "SELL"} ${lotsDisplay} ${lotsLabel}${slTpEnabled ? ` [SL: ${slPrice.toFixed(4)}, TP: ${tpPrice.toFixed(4)}]` : ""}`;
 
   const setSlPercentFromPrice = (price: number) => {
@@ -128,6 +171,8 @@ export function PlaceTradesCard({ livePrice, onTradePlaced, trades = [] }: Place
       entryPrice: effectivePrice,
       stopLoss: slTpEnabled ? slPrice : null,
       takeProfit: slTpEnabled ? tpPrice : null,
+      color: TRADE_COLORS[trades.length % TRADE_COLORS.length],
+      visible: true,
     };
     onTradePlaced?.(trade);
   };
@@ -322,13 +367,26 @@ export function PlaceTradesCard({ livePrice, onTradePlaced, trades = [] }: Place
               {trades.slice().reverse().map((trade) => (
                 <div key={trade.id} className="text-xs p-2 rounded border border-border bg-muted/30">
                   <div className="flex items-center justify-between">
-                    <span className={cn(
-                      "font-semibold uppercase",
-                      trade.side === "buy" ? "text-green-600 dark:text-green-500" : "text-red-600 dark:text-red-500"
-                    )}>
-                      {trade.side}
-                    </span>
-                    <span className="text-muted-foreground">{trade.lots} lots</span>
+                    <div className="flex items-center gap-2">
+                      <div 
+                        className="w-3 h-3 rounded-sm" 
+                        style={{ backgroundColor: trade.color }}
+                      />
+                      <span className={cn(
+                        "font-semibold uppercase",
+                        trade.side === "buy" ? "text-green-600 dark:text-green-500" : "text-red-600 dark:text-red-500"
+                      )}>
+                        {trade.side}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-muted-foreground">{trade.lots} lots</span>
+                      <Switch 
+                        checked={trade.visible}
+                        onCheckedChange={(checked) => onTradeVisibilityChange?.(trade.id, checked)}
+                        className="scale-75"
+                      />
+                    </div>
                   </div>
                   <div className="mt-1 space-y-0.5 text-muted-foreground">
                     <div>Entry: {trade.entryPrice.toFixed(5)}</div>
