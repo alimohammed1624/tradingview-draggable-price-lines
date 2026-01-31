@@ -105,6 +105,11 @@ export function ChartPanel({
   const onPriceChangeRef = useRef(onPriceChange);
   onPriceChangeRef.current = onPriceChange;
 
+  // Keep refs up to date
+  useEffect(() => {
+    tradesRef.current = trades;
+  }, [trades]);
+
   // Drag state refs
   const isDraggingRef = useRef(false);
   const dragTargetRef = useRef<DragTarget>(null);
@@ -116,6 +121,7 @@ export function ChartPanel({
   const onSlPriceDragRef = useRef(onSlPriceDrag);
   const onTpPriceDragRef = useRef(onTpPriceDrag);
   const onTradePriceUpdateRef = useRef(onTradePriceUpdate);
+  const tradesRef = useRef(trades);
   const streamRef = useRef<{ stop: () => void } | null>(null);
   const cleanupRef = useRef<(() => void) | null>(null);
   onSlPriceDragRef.current = onSlPriceDrag;
@@ -376,6 +382,10 @@ export function ChartPanel({
         for (const [tradeId, lines] of priceLinesRef.current.entries()) {
           if (lines.sl) {
             const slPrice = lines.sl.options().price;
+            const trade = tradesRef.current.find((t) => t.id === tradeId);
+            // Skip if locked
+            if (trade?.lockedSl) continue;
+            
             if (slPrice !== null && isNearPriceLine(mouseY, slPrice)) {
               isDraggingRef.current = true;
               dragTargetRef.current = { type: "sl", tradeId };
@@ -390,6 +400,10 @@ export function ChartPanel({
 
           if (lines.tp) {
             const tpPrice = lines.tp.options().price;
+            const trade = tradesRef.current.find((t) => t.id === tradeId);
+            // Skip if locked
+            if (trade?.lockedTp) continue;
+            
             if (tpPrice !== null && isNearPriceLine(mouseY, tpPrice)) {
               isDraggingRef.current = true;
               dragTargetRef.current = { type: "tp", tradeId };
@@ -457,15 +471,17 @@ export function ChartPanel({
           }
 
           if (!isNearAnyLine) {
-            for (const lines of priceLinesRef.current.values()) {
-              if (lines.sl) {
+            for (const [tradeId, lines] of priceLinesRef.current.entries()) {
+              const trade = tradesRef.current.find((t) => t.id === tradeId);
+              
+              if (lines.sl && !trade?.lockedSl) {
                 const slPrice = lines.sl.options().price;
                 if (slPrice !== null && isNearPriceLine(mouseY, slPrice)) {
                   isNearAnyLine = true;
                   break;
                 }
               }
-              if (lines.tp) {
+              if (lines.tp && !trade?.lockedTp) {
                 const tpPrice = lines.tp.options().price;
                 if (tpPrice !== null && isNearPriceLine(mouseY, tpPrice)) {
                   isNearAnyLine = true;
@@ -630,6 +646,8 @@ export function ChartPanel({
           const options: any = {
             lineVisible: trade.visible,
             axisLabelVisible: trade.visible,
+            lineWidth: trade.lockedSl ? 3 : 2,
+            lineStyle: trade.lockedSl ? LineStyle.Dashed : LineStyle.Dotted,
           };
           // Only update price if not currently dragging this SL line
           if (!(isDraggingThisLine && dragTargetRef.current?.type === "sl")) {
@@ -641,6 +659,8 @@ export function ChartPanel({
           const options: any = {
             lineVisible: trade.visible,
             axisLabelVisible: trade.visible,
+            lineWidth: trade.lockedTp ? 3 : 2,
+            lineStyle: trade.lockedTp ? LineStyle.Dashed : LineStyle.Dotted,
           };
           // Only update price if not currently dragging this TP line
           if (!(isDraggingThisLine && dragTargetRef.current?.type === "tp")) {
@@ -654,8 +674,8 @@ export function ChartPanel({
           existingLines.sl = series.createPriceLine({
             price: trade.stopLoss,
             color: trade.color,
-            lineWidth: 2,
-            lineStyle: LineStyle.Dotted,
+            lineWidth: trade.lockedSl ? 3 : 2,
+            lineStyle: trade.lockedSl ? LineStyle.Dashed : LineStyle.Dotted,
             lineVisible: trade.visible,
             axisLabelVisible: true,
             title: "SL",
@@ -669,8 +689,8 @@ export function ChartPanel({
           existingLines.tp = series.createPriceLine({
             price: trade.takeProfit,
             color: trade.color,
-            lineWidth: 2,
-            lineStyle: LineStyle.Dotted,
+            lineWidth: trade.lockedTp ? 3 : 2,
+            lineStyle: trade.lockedTp ? LineStyle.Dashed : LineStyle.Dotted,
             lineVisible: trade.visible,
             axisLabelVisible: true,
             title: "TP",
@@ -696,8 +716,8 @@ export function ChartPanel({
             ? series.createPriceLine({
                 price: trade.stopLoss,
                 color: trade.color,
-                lineWidth: 2,
-                lineStyle: LineStyle.Dotted,
+                lineWidth: trade.lockedSl ? 3 : 2,
+                lineStyle: trade.lockedSl ? LineStyle.Dashed : LineStyle.Dotted,
                 lineVisible: trade.visible,
                 axisLabelVisible: true,
                 title: "SL",
@@ -709,8 +729,8 @@ export function ChartPanel({
             ? series.createPriceLine({
                 price: trade.takeProfit,
                 color: trade.color,
-                lineWidth: 2,
-                lineStyle: LineStyle.Dotted,
+                lineWidth: trade.lockedTp ? 3 : 2,
+                lineStyle: trade.lockedTp ? LineStyle.Dashed : LineStyle.Dotted,
                 lineVisible: trade.visible,
                 axisLabelVisible: true,
                 title: "TP",

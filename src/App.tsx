@@ -62,20 +62,43 @@ export function App() {
     );
   };
 
+  const isValidSlTpPrice = (
+    trade: TradeLog,
+    lineType: "sl" | "tp",
+    newPrice: number,
+  ): boolean => {
+    if (trade.side === "buy") {
+      // For BUY: SL must be below entry, TP must be above entry
+      if (lineType === "sl") return newPrice < trade.entryPrice;
+      if (lineType === "tp") return newPrice > trade.entryPrice;
+    } else {
+      // For SELL: SL must be above entry, TP must be below entry
+      if (lineType === "sl") return newPrice > trade.entryPrice;
+      if (lineType === "tp") return newPrice < trade.entryPrice;
+    }
+    return false;
+  };
+
   const handleTradePriceUpdate = (
     tradeId: number,
     lineType: "sl" | "tp",
     newPrice: number,
   ) => {
     setTrades((prev) =>
-      prev.map((trade) =>
-        trade.id === tradeId
-          ? {
-              ...trade,
-              [lineType === "sl" ? "stopLoss" : "takeProfit"]: newPrice,
-            }
-          : trade,
-      ),
+      prev.map((trade) => {
+        const isValid = trade.id === tradeId && isValidSlTpPrice(trade, lineType, newPrice);
+        console.log(`[handleTradePriceUpdate] tradeId=${tradeId}, lineType=${lineType}, newPrice=${newPrice}, trade.side=${trade.side}, entry=${trade.entryPrice}, isValid=${isValid}`);
+        if (isValid) {
+          console.log(`[handleTradePriceUpdate] ✓ Updating ${lineType} to ${newPrice}`);
+          return {
+            ...trade,
+            [lineType === "sl" ? "stopLoss" : "takeProfit"]: newPrice,
+          };
+        } else if (trade.id === tradeId) {
+          console.log(`[handleTradePriceUpdate] ✗ Rejecting invalid ${lineType}=${newPrice} for ${trade.side} trade with entry=${trade.entryPrice}`);
+        }
+        return trade;
+      }),
     );
   };
 
@@ -90,6 +113,42 @@ export function App() {
           : trade,
       ),
     );
+  };
+
+  const handleToggleLock = (
+    tradeId: number,
+    type: "sl" | "tp",
+    locked: boolean,
+  ) => {
+    setTrades((prev) =>
+      prev.map((trade) =>
+        trade.id === tradeId
+          ? {
+              ...trade,
+              [type === "sl" ? "lockedSl" : "lockedTp"]: locked,
+            }
+          : trade,
+      ),
+    );
+  };
+
+  const handleTogglePositionLock = (tradeId: number, locked: boolean) => {
+    setTrades((prev) =>
+      prev.map((trade) =>
+        trade.id === tradeId
+          ? {
+              ...trade,
+              lockedPosition: locked,
+              lockedSl: locked,
+              lockedTp: locked,
+            }
+          : trade,
+      ),
+    );
+  };
+
+  const handleCloseTrade = (tradeId: number) => {
+    setTrades((prev) => prev.filter((trade) => trade.id !== tradeId));
   };
 
   return (
@@ -124,7 +183,6 @@ export function App() {
             <PlaceTradesCard
               livePrice={livePrice}
               onTradePlaced={handleTradePlaced}
-              onTradeVisibilityChange={handleTradeVisibilityChange}
               onPreviewTradeChange={setPreviewTrade}
               onSlDragHandlerReady={(handler) => {
                 slDragHandlerRef.current = handler;
@@ -135,6 +193,9 @@ export function App() {
               trades={trades}
               onRemoveSlTp={handleRemoveSlTp}
               onTradePriceUpdate={handleTradePriceUpdate}
+              onToggleLock={handleToggleLock}
+              onTogglePositionLock={handleTogglePositionLock}
+              onCloseTrade={handleCloseTrade}
               dataSource={dataSource}
               onDataSourceChange={setDataSource}
             />
