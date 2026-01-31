@@ -4,7 +4,7 @@
  */
 
 import type { OhlcBar } from "./aggregate-ticks";
-import type { ForexTick } from "./mock-forex-stream";
+import type { ForexTick, MockForexStreamOptions } from "./mock-forex-stream";
 
 const POLYGON_API_BASE = "https://api.polygon.io";
 const POLYGON_FOREX_WS_URL = "wss://socket.polygon.io/forex";
@@ -66,6 +66,32 @@ export async function fetchPolygonForexM5Bars(
       close: r.c,
     };
   });
+}
+
+/** Padding (in price) added to observed range so simulated price can move a bit beyond recent high/low. */
+const RANGE_PADDING_PIPS = 10 * 0.0001; // 10 pips
+
+/**
+ * Derives mock stream options from real OHLC bars so simulation uses the same
+ * range and level as recent market data (true-to-life price action).
+ */
+export function deriveMockOptionsFromBars(
+  bars: OhlcBar[],
+): MockForexStreamOptions {
+  if (bars.length === 0) {
+    return {};
+  }
+  const lows = bars.map((b) => b.low);
+  const highs = bars.map((b) => b.high);
+  const minObs = Math.min(...lows);
+  const maxObs = Math.max(...highs);
+  const lastClose = bars[bars.length - 1].close;
+  return {
+    basePrice: lastClose,
+    initialPrice: lastClose,
+    min: minObs - RANGE_PADDING_PIPS,
+    max: maxObs + RANGE_PADDING_PIPS,
+  };
 }
 
 /** Polygon aggregate-per-second message (ev = CAS). */

@@ -3,9 +3,11 @@ import { createM5Aggregator } from "@/lib/aggregate-ticks";
 import {
   createMockForexStream,
   generateInitialM5Bars,
+  type MockForexStreamOptions,
 } from "@/lib/mock-forex-stream";
 import {
   createPolygonForexStream,
+  deriveMockOptionsFromBars,
   fetchPolygonForexM5Bars,
 } from "@/lib/polygon-forex-stream";
 import {
@@ -131,34 +133,36 @@ export function ChartPanel({
         close: number;
       }[];
       let lastClose: number;
+      let mockOptions: MockForexStreamOptions = { initialPrice: 1.08 };
 
-      if (dataSource === "live") {
-        const apiKey = import.meta.env.VITE_POLYGON_API_KEY as
-          | string
-          | undefined;
-        try {
-          if (apiKey?.trim()) {
-            const bars = await fetchPolygonForexM5Bars(
-              "C:EURUSD",
-              M5_HISTORY_BAR_COUNT,
-              apiKey,
-            );
-            if (cancelled) return;
-            initialBars =
-              bars.length > 0
-                ? bars
-                : generateInitialM5Bars(M5_HISTORY_BAR_COUNT, {});
+      const apiKey = import.meta.env.VITE_POLYGON_API_KEY as string | undefined;
+      try {
+        if (apiKey?.trim()) {
+          const bars = await fetchPolygonForexM5Bars(
+            "C:EURUSD",
+            M5_HISTORY_BAR_COUNT,
+            apiKey,
+          );
+          if (cancelled) return;
+          if (bars.length > 0) {
+            initialBars = bars;
+            lastClose = bars[bars.length - 1].close;
+            mockOptions = deriveMockOptionsFromBars(bars);
           } else {
             initialBars = generateInitialM5Bars(M5_HISTORY_BAR_COUNT, {});
+            lastClose = initialBars[initialBars.length - 1].close;
+            mockOptions = { initialPrice: lastClose };
           }
-        } catch {
-          if (cancelled) return;
+        } else {
           initialBars = generateInitialM5Bars(M5_HISTORY_BAR_COUNT, {});
+          lastClose = initialBars[initialBars.length - 1].close;
+          mockOptions = { initialPrice: lastClose };
         }
-        lastClose = initialBars[initialBars.length - 1].close;
-      } else {
+      } catch {
+        if (cancelled) return;
         initialBars = generateInitialM5Bars(M5_HISTORY_BAR_COUNT, {});
         lastClose = initialBars[initialBars.length - 1].close;
+        mockOptions = { initialPrice: lastClose };
       }
 
       if (cancelled) return;
@@ -217,7 +221,7 @@ export function ChartPanel({
       const stream =
         dataSource === "live"
           ? createPolygonForexStream("EUR-USD")
-          : createMockForexStream("EURUSD", { initialPrice: lastClose });
+          : createMockForexStream("EURUSD", mockOptions);
       streamRef.current = stream;
       const aggregator = createM5Aggregator();
       stream.subscribe((tick) => {
