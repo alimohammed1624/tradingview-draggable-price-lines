@@ -55,8 +55,6 @@ export type ChartPanelProps = {
   onTpPriceDrag?: (price: number) => void;
   /** Callback when placed trade SL/TP is dragged */
   onTradePriceUpdate?: (tradeId: number, lineType: "sl" | "tp", newPrice: number) => void;
-  /** Callback when a trade should be highlighted */
-  onTradeHighlight?: (tradeId: number | null) => void;
 };
 
 type DragTarget = 
@@ -70,7 +68,7 @@ type TradeLines = {
   tp: IPriceLine | null;
 };
 
-export function ChartPanel({ onPriceChange, trades = [], previewTrade = null, onSlPriceDrag, onTpPriceDrag, onTradePriceUpdate, onTradeHighlight }: ChartPanelProps = {}) {
+export function ChartPanel({ onPriceChange, trades = [], previewTrade = null, onSlPriceDrag, onTpPriceDrag, onTradePriceUpdate }: ChartPanelProps = {}) {
   const chartContainerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const seriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
@@ -82,16 +80,15 @@ export function ChartPanel({ onPriceChange, trades = [], previewTrade = null, on
   // Drag state refs
   const isDraggingRef = useRef(false);
   const dragTargetRef = useRef<DragTarget>(null);
+  const dragFinalPriceRef = useRef<number | null>(null);
   const dragOriginalStylesRef = useRef<Map<IPriceLine, { width: number; style: LineStyle }>>(new Map());
   const tooltipRef = useRef<HTMLDivElement | null>(null);
   const onSlPriceDragRef = useRef(onSlPriceDrag);
   const onTpPriceDragRef = useRef(onTpPriceDrag);
   const onTradePriceUpdateRef = useRef(onTradePriceUpdate);
-  const onTradeHighlightRef = useRef(onTradeHighlight);
   onSlPriceDragRef.current = onSlPriceDrag;
   onTpPriceDragRef.current = onTpPriceDrag;
   onTradePriceUpdateRef.current = onTradePriceUpdate;
-  onTradeHighlightRef.current = onTradeHighlight;
 
   useEffect(() => {
     const container = chartContainerRef.current;
@@ -201,9 +198,6 @@ export function ChartPanel({ onPriceChange, trades = [], previewTrade = null, on
             }
           });
         }
-        
-        // Highlight the trade in the card
-        onTradeHighlightRef.current?.(target.tradeId);
       }
       
       // Create tooltip
@@ -236,9 +230,6 @@ export function ChartPanel({ onPriceChange, trades = [], previewTrade = null, on
         chartContainerRef.current.removeChild(tooltipRef.current);
         tooltipRef.current = null;
       }
-      
-      // Clear trade highlight
-      onTradeHighlightRef.current?.(null);
     };
 
     // Mouse down handler to start dragging
@@ -331,8 +322,8 @@ export function ChartPanel({ onPriceChange, trades = [], previewTrade = null, on
               onTpPriceDragRef.current?.(newPrice as number);
             }
           } else {
-            // Update placed trade
-            onTradePriceUpdateRef.current?.(target.tradeId, target.type, newPrice as number);
+            // Update placed trade - store the price for later update on drag end
+            dragFinalPriceRef.current = newPrice as number;
             
             // Update the line immediately for visual feedback
             const lines = priceLinesRef.current.get(target.tradeId);
@@ -393,9 +384,17 @@ export function ChartPanel({ onPriceChange, trades = [], previewTrade = null, on
     // Mouse up handler to stop dragging
     const handleMouseUp = () => {
       if (isDraggingRef.current) {
+        // Update trade price only after drag ends
+        const target = dragTargetRef.current;
+        const finalPrice = dragFinalPriceRef.current;
+        if (target && target.tradeId !== "preview" && finalPrice !== null) {
+          onTradePriceUpdateRef.current?.(target.tradeId, target.type, finalPrice);
+        }
+        
         removeDragVisuals();
         isDraggingRef.current = false;
         dragTargetRef.current = null;
+        dragFinalPriceRef.current = null;
         // Re-enable chart scroll/scale after drag
         chart.applyOptions({
           handleScroll: true,
@@ -472,6 +471,9 @@ export function ChartPanel({ onPriceChange, trades = [], previewTrade = null, on
   useEffect(() => {
     const series = seriesRef.current;
     if (!series) return;
+    
+    // Skip entire sync if currently dragging to prevent fighting with drag updates
+    if (isDraggingRef.current) return;
 
     const currentLines = priceLinesRef.current;
     const tradeIds = new Set(trades.map((t) => t.id));
@@ -493,19 +495,32 @@ export function ChartPanel({ onPriceChange, trades = [], previewTrade = null, on
       if (existingLines) {
         // Update existing price lines visibility and prices
         existingLines.entry.applyOptions({ lineVisible: trade.visible, axisLabelVisible: trade.visible });
+        
+        // Skip updating price if currently dragging this line
+        const isDraggingThisLine = isDraggingRef.current && 
+          dragTargetRef.current?.tradeId === trade.id;
+        
         if (existingLines.sl) {
-          existingLines.sl.applyOptions({ 
-            price: trade.stopLoss!,
+          const options: any = { 
             lineVisible: trade.visible, 
             axisLabelVisible: trade.visible 
-          });
+          };
+          // Only update price if not currently dragging this SL line
+          if (!(isDraggingThisLine && dragTargetRef.current?.type === "sl")) {
+            options.price = trade.stopLoss!;
+          }
+          existingLines.sl.applyOptions(options);
         }
         if (existingLines.tp) {
-          existingLines.tp.applyOptions({ 
-            price: trade.takeProfit!,
+          const options: any = { 
             lineVisible: trade.visible, 
             axisLabelVisible: trade.visible 
-          });
+          };
+          // Only update price if not currently dragging this TP line
+          if (!(isDraggingThisLine && dragTargetRef.current?.type === "tp")) {
+            options.price = trade.takeProfit!;
+          }
+          existingLines.tp.applyOptions(options);
         }
         
         // Handle SL/TP addition or removal
@@ -592,11 +607,11 @@ export function ChartPanel({ onPriceChange, trades = [], previewTrade = null, on
     if (previewTrade) {
       const newLines: IPriceLine[] = [];
 
-      // Stop loss line (solid) - Green
+      // Stop loss line (solid) - Red
       if (previewTrade.stopLoss !== null) {
         const slLine = series.createPriceLine({
           price: previewTrade.stopLoss,
-          color: "#ef4444", // Red for TP
+          color: previewTrade.color ?? "#ef4444", // Use trade color in edit mode, otherwise red
           lineWidth: 2,
           lineStyle: LineStyle.Solid,
           lineVisible: true,
@@ -606,11 +621,11 @@ export function ChartPanel({ onPriceChange, trades = [], previewTrade = null, on
         newLines.push(slLine);
       }
       
-      // Take profit line (solid) - Red
+      // Take profit line (solid) - Green
       if (previewTrade.takeProfit !== null) {
         const tpLine = series.createPriceLine({
           price: previewTrade.takeProfit,
-          color: "#10b981", // Green for SL
+          color: previewTrade.color ?? "#10b981", // Use trade color in edit mode, otherwise green
           lineWidth: 2,
           lineStyle: LineStyle.Solid,
           lineVisible: true,

@@ -5,20 +5,38 @@ import {
   ResizablePanel,
   ResizablePanelGroup,
 } from "@/components/ui/resizable";
-import { useState, useRef } from "react";
+import { Toggle } from "@/components/ui/toggle";
+import { IconMoon, IconSun } from "@tabler/icons-react";
+import { useState, useRef, useEffect } from "react";
 
 export function App() {
   const [livePrice, setLivePrice] = useState<number | undefined>(undefined);
   const [trades, setTrades] = useState<TradeLog[]>([]);
   const [previewTrade, setPreviewTrade] = useState<PreviewTrade | null>(null);
-  const [highlightedTradeId, setHighlightedTradeId] = useState<number | null>(null);
+  
+  // Theme state - initialize from localStorage or system preference
+  const [isDark, setIsDark] = useState<boolean>(() => {
+    const stored = localStorage.getItem('theme');
+    if (stored) return stored === 'dark';
+    return window.matchMedia('(prefers-color-scheme: dark)').matches;
+  });
+  
+  // Apply theme to document and persist to localStorage
+  useEffect(() => {
+    const root = document.documentElement;
+    if (isDark) {
+      root.classList.add('dark');
+    } else {
+      root.classList.remove('dark');
+    }
+    localStorage.setItem('theme', isDark ? 'dark' : 'light');
+  }, [isDark]);
   
   // Refs to store the drag handlers from PlaceTradesCard
   const slDragHandlerRef = useRef<((price: number) => void) | null>(null);
   const tpDragHandlerRef = useRef<((price: number) => void) | null>(null);
 
   const handleTradePlaced = (trade: TradeLog) => {
-    console.log("Trade placed:", trade);
     setTrades((prev) => [...prev, trade]);
   };
 
@@ -42,9 +60,32 @@ export function App() {
       )
     );
   };
+  
+  const handleRemoveSlTp = (tradeId: number, type: "sl" | "tp") => {
+    setTrades((prev) =>
+      prev.map((trade) =>
+        trade.id === tradeId
+          ? {
+              ...trade,
+              [type === "sl" ? "stopLoss" : "takeProfit"]: null,
+            }
+          : trade
+      )
+    );
+  };
 
   return (
     <div className="h-screen w-screen">
+      {/* Theme Toggle Button */}
+      <Toggle
+        pressed={isDark}
+        onPressedChange={setIsDark}
+        aria-label="Toggle theme"
+        className="fixed bottom-4 right-4 z-50 shadow-lg"
+      >
+        {isDark ? <IconMoon size={20} /> : <IconSun size={20} />}
+      </Toggle>
+      
       <ResizablePanelGroup orientation="horizontal" className="h-full w-full">
         <ResizablePanel defaultSize={70}>
           <ChartPanel 
@@ -54,7 +95,6 @@ export function App() {
             onSlPriceDrag={(price) => slDragHandlerRef.current?.(price)}
             onTpPriceDrag={(price) => tpDragHandlerRef.current?.(price)}
             onTradePriceUpdate={handleTradePriceUpdate}
-            onTradeHighlight={setHighlightedTradeId}
           />
         </ResizablePanel>
         <ResizableHandle withHandle />
@@ -68,7 +108,8 @@ export function App() {
               onSlDragHandlerReady={(handler) => { slDragHandlerRef.current = handler; }}
               onTpDragHandlerReady={(handler) => { tpDragHandlerRef.current = handler; }}
               trades={trades}
-              highlightedTradeId={highlightedTradeId}
+              onRemoveSlTp={handleRemoveSlTp}
+              onTradePriceUpdate={handleTradePriceUpdate}
             />
           </div>
         </ResizablePanel>

@@ -19,6 +19,13 @@ import {
 import { Label } from "@/components/ui/label";
 import { Slider } from "@/components/ui/slider";
 import { Switch } from "@/components/ui/switch";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
+import { IconEdit, IconCheck, IconTrash } from "@tabler/icons-react";
 import { cn } from "@/lib/utils";
 import * as React from "react";
 
@@ -31,23 +38,15 @@ const TRADE_COLORS = [
   "#06b6d4", // cyan
   "#f97316", // orange
   "#6366f1", // indigo
-];
+] as const;
 
 const LOTS_MIN = 0.1;
 const LOTS_MAX = 5;
 const LOTS_STEP = 0.01;
-const SL_TP_PERCENT_MIN = 1;
-const SL_TP_PERCENT_MAX = 500;
-const SL_TP_PERCENT_STEP = 0.1;
 
 function roundLots(value: number): number {
   const rounded = Math.round(value * 100) / 100;
   return Math.min(LOTS_MAX, Math.max(LOTS_MIN, rounded));
-}
-
-function clampPercent(value: number): number {
-  const rounded = Math.round(value * 10) / 10;
-  return Math.min(SL_TP_PERCENT_MAX, Math.max(SL_TP_PERCENT_MIN, rounded));
 }
 
 function clampPrice(value: number): number {
@@ -72,6 +71,7 @@ export type PreviewTrade = {
   entryPrice: number;
   stopLoss: number | null;
   takeProfit: number | null;
+  color?: string;
 };
 
 export type PlaceTradesCardProps = {
@@ -89,8 +89,10 @@ export type PlaceTradesCardProps = {
   onSlDragHandlerReady?: (handler: (price: number) => void) => void;
   /** Registers the TP price drag handler */
   onTpDragHandlerReady?: (handler: (price: number) => void) => void;
-  /** ID of the trade currently being highlighted */
-  highlightedTradeId?: number | null;
+  /** Callback to remove SL/TP from a trade */
+  onRemoveSlTp?: (tradeId: number, type: "sl" | "tp") => void;
+  /** Callback when trade SL/TP is updated */
+  onTradePriceUpdate?: (tradeId: number, lineType: "sl" | "tp", newPrice: number) => void;
 };
 
 export function PlaceTradesCard({ 
@@ -101,16 +103,54 @@ export function PlaceTradesCard({
   onPreviewTradeChange,
   onSlDragHandlerReady,
   onTpDragHandlerReady,
-  highlightedTradeId
-}: PlaceTradesCardProps = {}) {
+  onRemoveSlTp,
+  onTradePriceUpdate,
+}: PlaceTradesCardProps) {
   const [lots, setLots] = React.useState(0.1);
   const [side, setSide] = React.useState<Side>("buy");
   const [currentPrice, setCurrentPrice] = React.useState(1.0);
-  const [slTpEnabled, setSlTpEnabled] = React.useState(false);
-  const [slPercent, setSlPercent] = React.useState(1);
-  const [tpPercent, setTpPercent] = React.useState(1);
+  const [slEnabled, setSlEnabled] = React.useState(false);
+  const [tpEnabled, setTpEnabled] = React.useState(false);
+  const [slSliderValue, setSlSliderValue] = React.useState(33.33);
+  const [tpSliderValue, setTpSliderValue] = React.useState(33.33);
+  const [editingTradeId, setEditingTradeId] = React.useState<number | null>(null);
+  const [addingSlTp, setAddingSlTp] = React.useState<{ tradeId: number; type: "sl" | "tp"; sliderValue: number } | null>(null);
 
   const effectivePrice = livePrice ?? currentPrice;
+
+  // Convert linear slider value (0-100) to logarithmic percentage (0.1-100)
+  const sliderToPercent = React.useCallback((sliderValue: number): number => {
+    const minPercent = 0.1;
+    const maxPercent = 100;
+    const ratio = maxPercent / minPercent;
+    return minPercent * Math.pow(ratio, sliderValue / 100);
+  }, []);
+
+  // Convert logarithmic percentage (0.1-100) to linear slider value (0-100)
+  const percentToSlider = React.useCallback((percent: number): number => {
+    const minPercent = 0.1;
+    const maxPercent = 100;
+    const ratio = maxPercent / minPercent;
+    return (Math.log(percent / minPercent) / Math.log(ratio)) * 100;
+  }, []);
+
+  // Calculate percentages from slider values
+  const slPercent = sliderToPercent(slSliderValue);
+  const tpPercent = sliderToPercent(tpSliderValue);
+
+  // Calculate SL/TP price from entry price and percentage
+  const calculateSlTpPrice = React.useCallback((entryPrice: number, tradeSide: Side, type: "sl" | "tp", percent: number) => {
+    const multiplier = percent / 100;
+    if (type === "sl") {
+      return tradeSide === "buy" 
+        ? entryPrice * (1 - multiplier)
+        : entryPrice * (1 + multiplier);
+    } else {
+      return tradeSide === "buy"
+        ? entryPrice * (1 + multiplier)
+        : entryPrice * (1 - multiplier);
+    }
+  }, []);
 
   const lotsDisplay = Number(lots.toFixed(2));
   const lotsLabel = lotsDisplay === 1 ? "lot" : "lots";
@@ -127,16 +167,13 @@ export function PlaceTradesCard({
       : effectivePrice * (1 - tpPercent / 100),
   );
 
-  // Cap % so price never goes below 0: BUY SL and SELL TP max at 100%
-  const slPercentMax = side === "buy" ? 100 : SL_TP_PERCENT_MAX;
-  const tpPercentMax = side === "sell" ? 100 : SL_TP_PERCENT_MAX;
-  const slPercentCapped = Math.min(slPercent, slPercentMax);
-  const tpPercentCapped = Math.min(tpPercent, tpPercentMax);
-
+  // Uncheck SL/TP when entering edit mode
   React.useEffect(() => {
-    if (slPercent > slPercentMax) setSlPercent(slPercentMax);
-    if (tpPercent > tpPercentMax) setTpPercent(tpPercentMax);
-  }, [side]);
+    if (addingSlTp !== null) {
+      setSlEnabled(false);
+      setTpEnabled(false);
+    }
+  }, [addingSlTp]);
 
   // Update preview trade whenever relevant state changes
   React.useEffect(() => {
@@ -146,10 +183,29 @@ export function PlaceTradesCard({
     }
     onPreviewTradeChange?.({
       entryPrice: effectivePrice,
-      stopLoss: slTpEnabled ? slPrice : null,
-      takeProfit: slTpEnabled ? tpPrice : null,
+      stopLoss: slEnabled ? slPrice : null,
+      takeProfit: tpEnabled ? tpPrice : null,
     });
-  }, [effectivePrice, slPrice, tpPrice, slTpEnabled, livePrice, onPreviewTradeChange]);
+  }, [effectivePrice, slPrice, tpPrice, slEnabled, tpEnabled, livePrice, onPreviewTradeChange]);
+
+  // Update preview for adding SL/TP - only show the line being added
+  React.useEffect(() => {
+    if (addingSlTp) {
+      const trade = trades.find(t => t.id === addingSlTp.tradeId);
+      if (trade) {
+        const actualPercent = sliderToPercent(addingSlTp.sliderValue);
+        const price = calculateSlTpPrice(trade.entryPrice, trade.side, addingSlTp.type, actualPercent);
+        onPreviewTradeChange?.({
+          entryPrice: trade.entryPrice,
+          stopLoss: addingSlTp.type === "sl" ? price : null,
+          takeProfit: addingSlTp.type === "tp" ? price : null,
+          color: trade.color,
+        });
+      }
+    } else if (!slEnabled && !tpEnabled && livePrice === undefined) {
+      onPreviewTradeChange?.(null);
+    }
+  }, [addingSlTp, trades, onPreviewTradeChange, slEnabled, tpEnabled, livePrice, sliderToPercent, calculateSlTpPrice]);
 
   const setSlPercentFromPrice = React.useCallback((price: number) => {
     if (effectivePrice <= 0) return;
@@ -157,8 +213,9 @@ export function PlaceTradesCard({
       side === "buy"
         ? ((effectivePrice - price) / effectivePrice) * 100
         : ((price - effectivePrice) / effectivePrice) * 100;
-    setSlPercent(Math.min(clampPercent(pct), slPercentMax));
-  }, [effectivePrice, side, slPercentMax]);
+    const clampedPct = Math.max(0.1, Math.min(100, pct));
+    setSlSliderValue(percentToSlider(clampedPct));
+  }, [effectivePrice, side, percentToSlider]);
 
   const setTpPercentFromPrice = React.useCallback((price: number) => {
     if (effectivePrice <= 0) return;
@@ -166,20 +223,44 @@ export function PlaceTradesCard({
       side === "buy"
         ? ((price - effectivePrice) / effectivePrice) * 100
         : ((effectivePrice - price) / effectivePrice) * 100;
-    setTpPercent(Math.min(clampPercent(pct), tpPercentMax));
-  }, [effectivePrice, side, tpPercentMax]);
+    const clampedPct = Math.max(0.1, Math.min(100, pct));
+    setTpSliderValue(percentToSlider(clampedPct));
+  }, [effectivePrice, side, percentToSlider]);
+
+  // Create drag handler for edit mode that updates slider based on dragged price
+  const createEditModeDragHandler = React.useCallback((type: "sl" | "tp") => {
+    return (price: number) => {
+      const trade = trades.find(t => t.id === addingSlTp?.tradeId);
+      if (!trade) return;
+      
+      // Calculate percentage from dragged price based on type
+      const multiplier = type === "sl"
+        ? (trade.side === "buy" ? (trade.entryPrice - price) : (price - trade.entryPrice)) / trade.entryPrice
+        : (trade.side === "buy" ? (price - trade.entryPrice) : (trade.entryPrice - price)) / trade.entryPrice;
+      
+      const percent = Math.max(0.1, Math.min(100, multiplier * 100));
+      setAddingSlTp(prev => prev ? { ...prev, sliderValue: percentToSlider(percent) } : null);
+    };
+  }, [trades, addingSlTp?.tradeId, percentToSlider]);
 
   // Register SL price drag handler with parent
   React.useEffect(() => {
-    onSlDragHandlerReady?.(setSlPercentFromPrice);
-  }, [onSlDragHandlerReady, setSlPercentFromPrice]);
+    const handler = addingSlTp?.type === "sl" 
+      ? createEditModeDragHandler("sl")
+      : setSlPercentFromPrice;
+    onSlDragHandlerReady?.(handler);
+  }, [onSlDragHandlerReady, setSlPercentFromPrice, addingSlTp?.type, createEditModeDragHandler]);
 
   // Register TP price drag handler with parent
   React.useEffect(() => {
-    onTpDragHandlerReady?.(setTpPercentFromPrice);
-  }, [onTpDragHandlerReady, setTpPercentFromPrice]);
+    const handler = addingSlTp?.type === "tp"
+      ? createEditModeDragHandler("tp")
+      : setTpPercentFromPrice;
+    onTpDragHandlerReady?.(handler);
+  }, [onTpDragHandlerReady, setTpPercentFromPrice, addingSlTp?.type, createEditModeDragHandler]);
 
-  const actionLabel = `${side === "buy" ? "BUY" : "SELL"} ${lotsDisplay} ${lotsLabel}${slTpEnabled ? ` [SL: ${slPrice.toFixed(4)}, TP: ${tpPrice.toFixed(4)}]` : ""}`;
+  const slTpLabel = [slEnabled && `SL: ${slPrice.toFixed(4)}`, tpEnabled && `TP: ${tpPrice.toFixed(4)}`].filter(Boolean).join(", ");
+  const actionLabel = `${side === "buy" ? "BUY" : "SELL"} ${lotsDisplay} ${lotsLabel}${slTpLabel ? ` [${slTpLabel}]` : ""}`;
 
   const handlePlaceTrade = () => {
     const now = Date.now();
@@ -189,13 +270,14 @@ export function PlaceTradesCard({
       side,
       lots,
       entryPrice: effectivePrice,
-      stopLoss: slTpEnabled ? slPrice : null,
-      takeProfit: slTpEnabled ? tpPrice : null,
+      stopLoss: slEnabled ? slPrice : null,
+      takeProfit: tpEnabled ? tpPrice : null,
       color: TRADE_COLORS[trades.length % TRADE_COLORS.length],
       visible: true,
     };
     onTradePlaced?.(trade);
-    setSlTpEnabled(false);
+    setSlEnabled(false);
+    setTpEnabled(false);
   };
 
   return (
@@ -250,132 +332,68 @@ export function PlaceTradesCard({
           </ButtonGroup>
         </div>
 
-        {/* 3. SL/TP checkbox */}
+        {/* 3. Take Profit checkbox */}
         <div className="flex items-center gap-2">
           <Checkbox
-            id="sl-tp"
-            checked={slTpEnabled}
-            onCheckedChange={(checked) => setSlTpEnabled(checked === true)}
+            id="tp"
+            checked={tpEnabled}
+            onCheckedChange={(checked) => setTpEnabled(checked === true)}
           />
-          <Label htmlFor="sl-tp" className="cursor-pointer text-sm font-medium">
-            SL/TP
+          <Label htmlFor="tp" className="cursor-pointer text-sm font-medium">
+            Take Profit
           </Label>
         </div>
 
-        {/* 3.1 & 3.2 SL and TP input groups when checked */}
-        {slTpEnabled && (
-          <div className="flex flex-col gap-4 pl-6 border-l-2 border-muted">
-            <div className="space-y-2">
-              <Label>Current price</Label>
-              <Input
-                type="number"
-                min={0}
-                step={0.0001}
-                value={livePrice ?? ""}
-                placeholder="—"
-                readOnly
-                disabled
-                aria-readonly
-              />
+        {/* 3.1 TP section with logarithmic slider */}
+        {tpEnabled && (
+          <div className="space-y-2 pl-6 border-l-2 border-muted">
+            <div className="flex items-center justify-between">
+              <Label>Distance: {tpPercent.toFixed(2)}%</Label>
+              <span className="text-sm text-muted-foreground">
+                {tpPrice.toFixed(5)}
+              </span>
             </div>
-            <div className="space-y-2">
-              <Label>SL (% from price)</Label>
-              <InputGroup className={cn("flex-col h-auto gap-2 py-2 px-2")}>
-                <Slider
-                  min={SL_TP_PERCENT_MIN}
-                  max={slPercentMax}
-                  step={SL_TP_PERCENT_STEP}
-                  value={[slPercentCapped]}
-                  onValueChange={([v]) =>
-                    setSlPercent(Math.min(clampPercent(v), slPercentMax))
-                  }
-                />
-                <div className="flex items-center gap-2 w-full">
-                  <InputGroupInput
-                    type="number"
-                    min={SL_TP_PERCENT_MIN}
-                    max={slPercentMax}
-                    step={SL_TP_PERCENT_STEP}
-                    value={slPercentCapped}
-                    onChange={(e) =>
-                      setSlPercent(
-                        Math.min(
-                          clampPercent(Number(e.target.value) || 1),
-                          slPercentMax,
-                        ),
-                      )
-                    }
-                  />
-                  <InputGroupText>%</InputGroupText>
-                </div>
-                <div className="space-y-1.5">
-                  <Label className="text-muted-foreground text-xs">
-                    SL price
-                  </Label>
-                  <Input
-                    type="number"
-                    min={0}
-                    step={0.0001}
-                    value={slPrice.toFixed(4)}
-                    onChange={(e) =>
-                      setSlPercentFromPrice(
-                        clampPrice(Number(e.target.value) || 0),
-                      )
-                    }
-                  />
-                </div>
-              </InputGroup>
-            </div>
-            <div className="space-y-2">
-              <Label>TP (% from price)</Label>
-              <InputGroup className={cn("flex-col h-auto gap-2 py-2 px-2")}>
-                <Slider
-                  min={SL_TP_PERCENT_MIN}
-                  max={tpPercentMax}
-                  step={SL_TP_PERCENT_STEP}
-                  value={[tpPercentCapped]}
-                  onValueChange={([v]) =>
-                    setTpPercent(Math.min(clampPercent(v), tpPercentMax))
-                  }
-                />
-                <div className="flex items-center gap-2 w-full">
-                  <InputGroupInput
-                    type="number"
-                    min={SL_TP_PERCENT_MIN}
-                    max={tpPercentMax}
-                    step={SL_TP_PERCENT_STEP}
-                    value={tpPercentCapped}
-                    onChange={(e) =>
-                      setTpPercent(
-                        Math.min(
-                          clampPercent(Number(e.target.value) || 1),
-                          tpPercentMax,
-                        ),
-                      )
-                    }
-                  />
-                  <InputGroupText>%</InputGroupText>
-                </div>
-                <div className="space-y-1.5">
-                  <Label className="text-muted-foreground text-xs">
-                    TP price
-                  </Label>
-                  <Input
-                    type="number"
-                    min={0}
-                    step={0.0001}
-                    value={tpPrice.toFixed(4)}
-                    onChange={(e) =>
-                      setTpPercentFromPrice(
-                        clampPrice(Number(e.target.value) || 0),
-                      )
-                    }
-                  />
-                </div>
-              </InputGroup>
-            </div>
+            <Slider
+              value={[tpSliderValue]}
+              min={0}
+              max={100}
+              step={0.01}
+              onValueChange={([value]) => setTpSliderValue(value)}
+            />
           </div>
         )}
+
+        {/* 4. Stop Loss checkbox */}
+        <div className="flex items-center gap-2">
+          <Checkbox
+            id="sl"
+            checked={slEnabled}
+            onCheckedChange={(checked) => setSlEnabled(checked === true)}
+          />
+          <Label htmlFor="sl" className="cursor-pointer text-sm font-medium">
+            Stop Loss
+          </Label>
+        </div>
+
+        {/* 4.1 SL section with logarithmic slider */}
+        {slEnabled && (
+          <div className="space-y-2 pl-6 border-l-2 border-muted">
+            <div className="flex items-center justify-between">
+              <Label>Distance: {slPercent.toFixed(2)}%</Label>
+              <span className="text-sm text-muted-foreground">
+                {slPrice.toFixed(5)}
+              </span>
+            </div>
+            <Slider
+              value={[slSliderValue]}
+              min={0}
+              max={100}
+              step={0.01}
+              onValueChange={([value]) => setSlSliderValue(value)}
+            />
+          </div>
+        )}
+
       </CardContent>
       <CardFooter className="flex flex-col gap-2">
         <Button type="button" className="w-full" onClick={handlePlaceTrade}>
@@ -384,16 +402,11 @@ export function PlaceTradesCard({
         {trades.length > 0 && (
           <div className="w-full mt-4 space-y-2">
             <div className="text-xs font-medium text-muted-foreground">Recent Trades</div>
-            <div className="space-y-1.5 max-h-[200px] overflow-y-auto">
+            <div className="space-y-1.5 max-h-[calc(100vh-25rem)] overflow-y-auto">
               {trades.slice().reverse().map((trade) => (
                 <div 
                   key={trade.id} 
-                  className={cn(
-                    "text-xs p-2 rounded border transition-all duration-200",
-                    highlightedTradeId === trade.id
-                      ? "border-primary bg-primary/10 shadow-lg scale-[1.02] animate-pulse"
-                      : "border-border bg-muted/30"
-                  )}
+                  className="text-xs p-2 rounded border border-border bg-muted/30"
                 >
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-2">
@@ -419,9 +432,171 @@ export function PlaceTradesCard({
                   </div>
                   <div className="mt-1 space-y-0.5 text-muted-foreground">
                     <div>Entry: {trade.entryPrice.toFixed(5)}</div>
-                    {trade.stopLoss && <div>SL: {trade.stopLoss.toFixed(5)}</div>}
-                    {trade.takeProfit && <div>TP: {trade.takeProfit.toFixed(5)}</div>}
+                    {editingTradeId === trade.id ? (
+                      <>
+                        {trade.stopLoss && (
+                          <div className="flex items-center justify-between">
+                            <span>SL: {trade.stopLoss.toFixed(5)}</span>
+                            <TooltipProvider>
+                              <Tooltip>
+                                <TooltipTrigger asChild>
+                                  <Button
+                                    size="sm"
+                                    variant="ghost"
+                                    className="h-4 w-4 p-0 text-destructive hover:bg-destructive/10"
+                                    onClick={() => {
+                                      onRemoveSlTp?.(trade.id, "sl");
+                                    }}
+                                  >
+                                    <IconTrash size={10} />
+                                  </Button>
+                                </TooltipTrigger>
+                                <TooltipContent>Remove SL</TooltipContent>
+                              </Tooltip>
+                            </TooltipProvider>
+                          </div>
+                        )}
+                        {trade.takeProfit && (
+                          <div className="flex items-center justify-between">
+                            <span>TP: {trade.takeProfit.toFixed(5)}</span>
+                            <TooltipProvider>
+                              <Tooltip>
+                                <TooltipTrigger asChild>
+                                  <Button
+                                    size="sm"
+                                    variant="ghost"
+                                    className="h-4 w-4 p-0 text-destructive hover:bg-destructive/10"
+                                    onClick={() => {
+                                      onRemoveSlTp?.(trade.id, "tp");
+                                    }}
+                                  >
+                                    <IconTrash size={10} />
+                                  </Button>
+                                </TooltipTrigger>
+                                <TooltipContent>Remove TP</TooltipContent>
+                              </Tooltip>
+                            </TooltipProvider>
+                          </div>
+                        )}
+                      </>
+                    ) : (
+                      <>
+                        {trade.stopLoss && <div>SL: {trade.stopLoss.toFixed(5)}</div>}
+                        {trade.takeProfit && <div>TP: {trade.takeProfit.toFixed(5)}</div>}
+                      </>
+                    )}
                   </div>
+                  
+                  {editingTradeId === trade.id ? (
+                    <div className="mt-2 space-y-2">
+                      {addingSlTp?.tradeId === trade.id ? (
+                        <div className="space-y-2">
+                          <div className="text-xs font-medium">
+                            {addingSlTp.type === "sl" ? "Stop Loss" : "Take Profit"} ({sliderToPercent(addingSlTp.sliderValue).toFixed(1)}%)
+                          </div>
+                          <Slider
+                            value={[addingSlTp.sliderValue]}
+                            onValueChange={(value) => setAddingSlTp({ ...addingSlTp, sliderValue: value[0] })}
+                            min={0}
+                            max={100}
+                            step={0.5}
+                            className="w-full"
+                          />
+                          <div className="text-xs text-muted-foreground">
+                            Price: {calculateSlTpPrice(trade.entryPrice, trade.side, addingSlTp.type, sliderToPercent(addingSlTp.sliderValue)).toFixed(5)}
+                          </div>
+                          <div className="flex gap-1">
+                            <Button
+                              size="sm"
+                              variant="default"
+                              className="h-6 text-xs flex-1"
+                              onClick={() => {
+                                const actualPercent = sliderToPercent(addingSlTp.sliderValue);
+                                const price = calculateSlTpPrice(trade.entryPrice, trade.side, addingSlTp.type, actualPercent);
+                                if (addingSlTp.type === "sl") {
+                                  onTradePriceUpdate?.(trade.id, "sl", price);
+                                } else {
+                                  onTradePriceUpdate?.(trade.id, "tp", price);
+                                }
+                                setAddingSlTp(null);
+                                onPreviewTradeChange?.(null);
+                              }}
+                            >
+                              Confirm
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              className="h-6 text-xs"
+                              onClick={() => {
+                                setAddingSlTp(null);
+                                onPreviewTradeChange?.(null);
+                              }}
+                            >
+                              Cancel
+                            </Button>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="flex gap-1">
+                          {!trade.stopLoss && (
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              className="h-6 text-xs flex-1"
+                              onClick={() => {
+                                setAddingSlTp({ tradeId: trade.id, type: "sl", sliderValue: percentToSlider(1) });
+                              }}
+                            >
+                              Add SL
+                            </Button>
+                          )}
+                          
+                          {!trade.takeProfit && (
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              className="h-6 text-xs flex-1"
+                              onClick={() => {
+                                setAddingSlTp({ tradeId: trade.id, type: "tp", sliderValue: percentToSlider(1) });
+                              }}
+                            >
+                              Add TP
+                            </Button>
+                          )}
+                          
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            className="h-6 w-6 p-0"
+                            onClick={() => {
+                              setEditingTradeId(null);
+                              setAddingSlTp(null);
+                              onPreviewTradeChange?.(null);
+                            }}
+                          >
+                            <IconCheck size={14} />
+                          </Button>
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="h-6 text-xs w-full mt-1"
+                      onClick={() => {
+                        // Close any open edit mode first
+                        if (editingTradeId !== null) {
+                          setAddingSlTp(null);
+                          onPreviewTradeChange?.(null);
+                        }
+                        setEditingTradeId(trade.id);
+                      }}
+                    >
+                      <IconEdit size={12} className="mr-1" /> Edit
+                    </Button>
+                  )}
                 </div>
               ))}
             </div>
