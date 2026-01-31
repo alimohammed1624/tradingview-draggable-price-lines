@@ -27,16 +27,18 @@ import { useEffect, useRef } from "react";
 const M5_HISTORY_BAR_COUNT = 288;
 
 /** lightweight-charts only accepts rgb/rgba/hex, not oklch. Use hex so it always parses. */
-function getChartColors(): {
+function getChartColors(isDark?: boolean): {
   backgroundColor: string;
   textColor: string;
   upColor: string;
   downColor: string;
 } {
-  const isDark =
-    document.documentElement.classList.contains("dark") ||
-    window.matchMedia("(prefers-color-scheme: dark)").matches;
-  return isDark
+  const dark =
+    isDark !== undefined
+      ? isDark
+      : document.documentElement.classList.contains("dark") ||
+        window.matchMedia("(prefers-color-scheme: dark)").matches;
+  return dark
     ? {
         backgroundColor: "#1c1c1c",
         textColor: "#fafafa",
@@ -70,6 +72,8 @@ export type ChartPanelProps = {
   ) => void;
   /** Data source: simulated (default) or live EURUSD */
   dataSource?: "simulated" | "live";
+  /** When true, use dark theme for chart colors */
+  isDark?: boolean;
 };
 
 type DragTarget =
@@ -91,6 +95,7 @@ export function ChartPanel({
   onTpPriceDrag,
   onTradePriceUpdate,
   dataSource = "simulated",
+  isDark,
 }: ChartPanelProps = {}) {
   const chartContainerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -122,7 +127,8 @@ export function ChartPanel({
     const container = chartContainerRef.current;
     if (!container) return;
 
-    const { backgroundColor, textColor, upColor, downColor } = getChartColors();
+    const { backgroundColor, textColor, upColor, downColor } =
+      getChartColors(isDark);
 
     (async () => {
       let initialBars: {
@@ -562,6 +568,27 @@ export function ChartPanel({
       cleanupRef.current = null;
     };
   }, [dataSource]);
+
+  // Update chart colors when theme (isDark) changes
+  useEffect(() => {
+    const chart = chartRef.current;
+    const series = seriesRef.current;
+    if (!chart || !series) return;
+    const { backgroundColor, textColor, upColor, downColor } =
+      getChartColors(isDark);
+    chart.applyOptions({
+      layout: {
+        background: { type: ColorType.Solid, color: backgroundColor },
+        textColor,
+      },
+    });
+    series.applyOptions({
+      upColor,
+      downColor,
+      wickUpColor: upColor,
+      wickDownColor: downColor,
+    });
+  }, [isDark]);
 
   // Sync price lines with trades
   useEffect(() => {

@@ -115,6 +115,7 @@ export function App() {
             onTpPriceDrag={(price) => tpDragHandlerRef.current?.(price)}
             onTradePriceUpdate={handleTradePriceUpdate}
             dataSource={dataSource}
+            isDark={isDark}
           />
         </ResizablePanel>
         <ResizableHandle withHandle />
