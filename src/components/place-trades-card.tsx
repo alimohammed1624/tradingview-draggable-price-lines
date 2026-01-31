@@ -444,13 +444,16 @@ export function PlaceTradesCard({
               {trades
                 .slice()
                 .reverse()
-                .map((trade) => (
+                .map((trade, index) => (
                   <div
                     key={trade.id}
                     className="text-xs p-2 rounded border border-border bg-muted/30"
                   >
                     <div className="flex items-center justify-between">
                       <div className="flex items-center gap-2">
+                        <span className="font-semibold text-muted-foreground min-w-6">
+                          #{index + 1}
+                        </span>
                         <div
                           className="w-3 h-3 rounded-sm"
                           style={{ backgroundColor: trade.color }}

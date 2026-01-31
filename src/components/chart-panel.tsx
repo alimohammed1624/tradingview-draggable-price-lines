@@ -628,7 +628,9 @@ export function ChartPanel({
     });
 
     // Add or update price lines for each trade
-    trades.forEach((trade) => {
+    trades.forEach((trade, arrayIndex) => {
+      // Calculate the display index (reverse order like in the UI)
+      const displayIndex = trades.length - arrayIndex;
       const existingLines = currentLines.get(trade.id);
 
       if (existingLines) {
@@ -636,6 +638,7 @@ export function ChartPanel({
         existingLines.entry.applyOptions({
           lineVisible: trade.visible,
           axisLabelVisible: trade.visible,
+          title: `#${displayIndex} Entry`,
         });
 
         // Skip updating price if currently dragging this line
@@ -648,6 +651,7 @@ export function ChartPanel({
             axisLabelVisible: trade.visible,
             lineWidth: trade.lockedSl ? 3 : 2,
             lineStyle: trade.lockedSl ? LineStyle.Dashed : LineStyle.Dotted,
+            title: `#${displayIndex} SL`,
           };
           // Only update price if not currently dragging this SL line
           if (!(isDraggingThisLine && dragTargetRef.current?.type === "sl")) {
@@ -661,6 +665,7 @@ export function ChartPanel({
             axisLabelVisible: trade.visible,
             lineWidth: trade.lockedTp ? 3 : 2,
             lineStyle: trade.lockedTp ? LineStyle.Dashed : LineStyle.Dotted,
+            title: `#${displayIndex} TP`,
           };
           // Only update price if not currently dragging this TP line
           if (!(isDraggingThisLine && dragTargetRef.current?.type === "tp")) {
@@ -678,7 +683,7 @@ export function ChartPanel({
             lineStyle: trade.lockedSl ? LineStyle.Dashed : LineStyle.Dotted,
             lineVisible: trade.visible,
             axisLabelVisible: true,
-            title: "SL",
+            title: `#${displayIndex} SL`,
           });
         } else if (trade.stopLoss === null && existingLines.sl) {
           series.removePriceLine(existingLines.sl);
@@ -693,7 +698,7 @@ export function ChartPanel({
             lineStyle: trade.lockedTp ? LineStyle.Dashed : LineStyle.Dotted,
             lineVisible: trade.visible,
             axisLabelVisible: true,
-            title: "TP",
+            title: `#${displayIndex} TP`,
           });
         } else if (trade.takeProfit === null && existingLines.tp) {
           series.removePriceLine(existingLines.tp);
@@ -708,7 +713,7 @@ export function ChartPanel({
           lineStyle: LineStyle.Dotted,
           lineVisible: trade.visible,
           axisLabelVisible: true,
-          title: "Entry",
+          title: `#${displayIndex} Entry`,
         });
 
         const slLine =
@@ -720,7 +725,7 @@ export function ChartPanel({
                 lineStyle: trade.lockedSl ? LineStyle.Dashed : LineStyle.Dotted,
                 lineVisible: trade.visible,
                 axisLabelVisible: true,
-                title: "SL",
+                title: `#${displayIndex} SL`,
               })
             : null;
 
@@ -733,7 +738,7 @@ export function ChartPanel({
                 lineStyle: trade.lockedTp ? LineStyle.Dashed : LineStyle.Dotted,
                 lineVisible: trade.visible,
                 axisLabelVisible: true,
-                title: "TP",
+                title: `#${displayIndex} TP`,
               })
             : null;
 
