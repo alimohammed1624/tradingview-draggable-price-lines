@@ -392,7 +392,7 @@ export function ChartPanel({ onPriceChange, trades = [], previewTrade = null, on
       if (previewTrade.stopLoss !== null) {
         const slLine = series.createPriceLine({
           price: previewTrade.stopLoss,
-          color: "#10b981", // Green for SL
+          color: "#ef4444", // Red for TP
           lineWidth: 2,
           lineStyle: LineStyle.Solid,
           lineVisible: true,
@@ -401,12 +401,12 @@ export function ChartPanel({ onPriceChange, trades = [], previewTrade = null, on
         });
         newLines.push(slLine);
       }
-
+      
       // Take profit line (solid) - Red
       if (previewTrade.takeProfit !== null) {
         const tpLine = series.createPriceLine({
           price: previewTrade.takeProfit,
-          color: "#ef4444", // Red for TP
+          color: "#10b981", // Green for SL
           lineWidth: 2,
           lineStyle: LineStyle.Solid,
           lineVisible: true,

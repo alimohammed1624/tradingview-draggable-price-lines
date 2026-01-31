@@ -192,6 +192,7 @@ export function PlaceTradesCard({
       visible: true,
     };
     onTradePlaced?.(trade);
+    setSlTpEnabled(false);
   };
 
   return (
