@@ -53,24 +53,45 @@ export type ChartPanelProps = {
   onSlPriceDrag?: (price: number) => void;
   /** Callback when TP preview line is dragged */
   onTpPriceDrag?: (price: number) => void;
+  /** Callback when placed trade SL/TP is dragged */
+  onTradePriceUpdate?: (tradeId: number, lineType: "sl" | "tp", newPrice: number) => void;
+  /** Callback when a trade should be highlighted */
+  onTradeHighlight?: (tradeId: number | null) => void;
 };
 
-export function ChartPanel({ onPriceChange, trades = [], previewTrade = null, onSlPriceDrag, onTpPriceDrag }: ChartPanelProps = {}) {
+type DragTarget = 
+  | { type: "sl" | "tp"; tradeId: number }
+  | { type: "sl" | "tp"; tradeId: "preview" }
+  | null;
+
+type TradeLines = {
+  entry: IPriceLine;
+  sl: IPriceLine | null;
+  tp: IPriceLine | null;
+};
+
+export function ChartPanel({ onPriceChange, trades = [], previewTrade = null, onSlPriceDrag, onTpPriceDrag, onTradePriceUpdate, onTradeHighlight }: ChartPanelProps = {}) {
   const chartContainerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const seriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
-  const priceLinesRef = useRef<Map<number, IPriceLine[]>>(new Map());
+  const priceLinesRef = useRef<Map<number, TradeLines>>(new Map());
   const previewLinesRef = useRef<IPriceLine[]>([]);
   const onPriceChangeRef = useRef(onPriceChange);
   onPriceChangeRef.current = onPriceChange;
   
   // Drag state refs
   const isDraggingRef = useRef(false);
-  const dragTargetRef = useRef<"sl" | "tp" | null>(null);
+  const dragTargetRef = useRef<DragTarget>(null);
+  const dragOriginalStylesRef = useRef<Map<IPriceLine, { width: number; style: LineStyle }>>(new Map());
+  const tooltipRef = useRef<HTMLDivElement | null>(null);
   const onSlPriceDragRef = useRef(onSlPriceDrag);
   const onTpPriceDragRef = useRef(onTpPriceDrag);
+  const onTradePriceUpdateRef = useRef(onTradePriceUpdate);
+  const onTradeHighlightRef = useRef(onTradeHighlight);
   onSlPriceDragRef.current = onSlPriceDrag;
   onTpPriceDragRef.current = onTpPriceDrag;
+  onTradePriceUpdateRef.current = onTradePriceUpdate;
+  onTradeHighlightRef.current = onTradeHighlight;
 
   useEffect(() => {
     const container = chartContainerRef.current;
@@ -144,6 +165,82 @@ export function ChartPanel({ onPriceChange, trades = [], previewTrade = null, on
       return Math.abs(mouseY - lineY) <= DRAG_THRESHOLD;
     };
 
+    // Helper to apply visual feedback when drag starts
+    const applyDragVisuals = (target: DragTarget) => {
+      if (!target) return;
+      
+      dragOriginalStylesRef.current.clear();
+      
+      if (target.tradeId === "preview") {
+        // For preview, highlight the dragged line
+        const lineIndex = target.type === "sl" ? 0 : 1;
+        const line = previewLinesRef.current[lineIndex];
+        if (line) {
+          const opts = line.options();
+          dragOriginalStylesRef.current.set(line, { width: opts.lineWidth ?? 2, style: opts.lineStyle ?? LineStyle.Solid });
+          line.applyOptions({ lineWidth: 4, lineStyle: LineStyle.Solid });
+        }
+      } else {
+        // For placed trades, highlight all lines of the trade
+        const tradeLines = priceLinesRef.current.get(target.tradeId);
+        if (tradeLines) {
+          // Highlight the dragged line more prominently
+          const draggedLine = target.type === "sl" ? tradeLines.sl : tradeLines.tp;
+          if (draggedLine) {
+            const opts = draggedLine.options();
+            dragOriginalStylesRef.current.set(draggedLine, { width: opts.lineWidth ?? 2, style: opts.lineStyle ?? LineStyle.Dotted });
+            draggedLine.applyOptions({ lineWidth: 4, lineStyle: LineStyle.Solid });
+          }
+          
+          // Highlight other lines of the same trade
+          [tradeLines.entry, target.type === "sl" ? tradeLines.tp : tradeLines.sl].forEach(line => {
+            if (line) {
+              const opts = line.options();
+              dragOriginalStylesRef.current.set(line, { width: opts.lineWidth ?? 2, style: opts.lineStyle ?? LineStyle.Dotted });
+              line.applyOptions({ lineWidth: 3 });
+            }
+          });
+        }
+        
+        // Highlight the trade in the card
+        onTradeHighlightRef.current?.(target.tradeId);
+      }
+      
+      // Create tooltip
+      if (!tooltipRef.current && chartContainerRef.current) {
+        const tooltip = document.createElement('div');
+        tooltip.style.position = 'absolute';
+        tooltip.style.backgroundColor = 'rgba(0, 0, 0, 0.8)';
+        tooltip.style.color = 'white';
+        tooltip.style.padding = '4px 8px';
+        tooltip.style.borderRadius = '4px';
+        tooltip.style.fontSize = '12px';
+        tooltip.style.pointerEvents = 'none';
+        tooltip.style.zIndex = '1000';
+        tooltip.style.fontFamily = 'monospace';
+        chartContainerRef.current.appendChild(tooltip);
+        tooltipRef.current = tooltip;
+      }
+    };
+    
+    // Helper to remove visual feedback when drag ends
+    const removeDragVisuals = () => {
+      // Restore original line styles
+      dragOriginalStylesRef.current.forEach((original, line) => {
+        line.applyOptions({ lineWidth: original.width, lineStyle: original.style });
+      });
+      dragOriginalStylesRef.current.clear();
+      
+      // Remove tooltip
+      if (tooltipRef.current && chartContainerRef.current) {
+        chartContainerRef.current.removeChild(tooltipRef.current);
+        tooltipRef.current = null;
+      }
+      
+      // Clear trade highlight
+      onTradeHighlightRef.current?.(null);
+    };
+
     // Mouse down handler to start dragging
     const handleMouseDown = (e: MouseEvent) => {
       if (!seriesRef.current || !chartContainerRef.current) return;
@@ -151,39 +248,64 @@ export function ChartPanel({ onPriceChange, trades = [], previewTrade = null, on
       const rect = chartContainerRef.current.getBoundingClientRect();
       const mouseY = e.clientY - rect.top;
       
-      // Get current preview line prices from refs
+      // Check preview lines first
       const previewLines = previewLinesRef.current;
-      if (previewLines.length === 0) return;
+      if (previewLines.length > 0) {
+        const slLine = previewLines[0];
+        const tpLine = previewLines[1];
+        const slPrice = slLine?.options().price ?? null;
+        const tpPrice = tpLine?.options().price ?? null;
+        
+        if (slPrice !== null && isNearPriceLine(mouseY, slPrice)) {
+          isDraggingRef.current = true;
+          dragTargetRef.current = { type: "sl", tradeId: "preview" };
+          applyDragVisuals(dragTargetRef.current);
+          setCursor("ns-resize");
+          chart.applyOptions({ handleScroll: false, handleScale: false });
+          e.preventDefault();
+          e.stopPropagation();
+          return;
+        } else if (tpPrice !== null && isNearPriceLine(mouseY, tpPrice)) {
+          isDraggingRef.current = true;
+          dragTargetRef.current = { type: "tp", tradeId: "preview" };
+          applyDragVisuals(dragTargetRef.current);
+          setCursor("ns-resize");
+          chart.applyOptions({ handleScroll: false, handleScale: false });
+          e.preventDefault();
+          e.stopPropagation();
+          return;
+        }
+      }
       
-      // Check SL line (index 0) and TP line (index 1)
-      const slLine = previewLines[0];
-      const tpLine = previewLines[1];
-      
-      const slPrice = slLine?.options().price ?? null;
-      const tpPrice = tpLine?.options().price ?? null;
-      
-      if (slPrice !== null && isNearPriceLine(mouseY, slPrice)) {
-        isDraggingRef.current = true;
-        dragTargetRef.current = "sl";
-        setCursor("ns-resize");
-        // Disable chart scroll/scale during drag
-        chart.applyOptions({
-          handleScroll: false,
-          handleScale: false,
-        });
-        e.preventDefault();
-        e.stopPropagation();
-      } else if (tpPrice !== null && isNearPriceLine(mouseY, tpPrice)) {
-        isDraggingRef.current = true;
-        dragTargetRef.current = "tp";
-        setCursor("ns-resize");
-        // Disable chart scroll/scale during drag
-        chart.applyOptions({
-          handleScroll: false,
-          handleScale: false,
-        });
-        e.preventDefault();
-        e.stopPropagation();
+      // Check all placed trade lines
+      for (const [tradeId, lines] of priceLinesRef.current.entries()) {
+        if (lines.sl) {
+          const slPrice = lines.sl.options().price;
+          if (slPrice !== null && isNearPriceLine(mouseY, slPrice)) {
+            isDraggingRef.current = true;
+            dragTargetRef.current = { type: "sl", tradeId };
+            applyDragVisuals(dragTargetRef.current);
+            setCursor("ns-resize");
+            chart.applyOptions({ handleScroll: false, handleScale: false });
+            e.preventDefault();
+            e.stopPropagation();
+            return;
+          }
+        }
+        
+        if (lines.tp) {
+          const tpPrice = lines.tp.options().price;
+          if (tpPrice !== null && isNearPriceLine(mouseY, tpPrice)) {
+            isDraggingRef.current = true;
+            dragTargetRef.current = { type: "tp", tradeId };
+            applyDragVisuals(dragTargetRef.current);
+            setCursor("ns-resize");
+            chart.applyOptions({ handleScroll: false, handleScale: false });
+            e.preventDefault();
+            e.stopPropagation();
+            return;
+          }
+        }
       }
     };
 
@@ -193,41 +315,85 @@ export function ChartPanel({ onPriceChange, trades = [], previewTrade = null, on
       
       const rect = chartContainerRef.current.getBoundingClientRect();
       const mouseY = e.clientY - rect.top;
+      const mouseX = e.clientX - rect.left;
       
       if (isDraggingRef.current && dragTargetRef.current) {
         // Convert Y coordinate to price
         const newPrice = seriesRef.current.coordinateToPrice(mouseY);
         if (newPrice !== null) {
-          if (dragTargetRef.current === "sl") {
-            onSlPriceDragRef.current?.(newPrice as number);
-          } else if (dragTargetRef.current === "tp") {
-            onTpPriceDragRef.current?.(newPrice as number);
+          const target = dragTargetRef.current;
+          
+          if (target.tradeId === "preview") {
+            // Update preview trade
+            if (target.type === "sl") {
+              onSlPriceDragRef.current?.(newPrice as number);
+            } else {
+              onTpPriceDragRef.current?.(newPrice as number);
+            }
+          } else {
+            // Update placed trade
+            onTradePriceUpdateRef.current?.(target.tradeId, target.type, newPrice as number);
+            
+            // Update the line immediately for visual feedback
+            const lines = priceLinesRef.current.get(target.tradeId);
+            if (lines) {
+              const line = target.type === "sl" ? lines.sl : lines.tp;
+              line?.applyOptions({ price: newPrice as number });
+            }
+          }
+          
+          // Update tooltip
+          if (tooltipRef.current) {
+            tooltipRef.current.textContent = `${target.type.toUpperCase()}: ${(newPrice as number).toFixed(5)}`;
+            tooltipRef.current.style.left = `${mouseX + 10}px`;
+            tooltipRef.current.style.top = `${mouseY - 10}px`;
           }
         }
       } else {
         // Update cursor based on hover
+        let isNearAnyLine = false;
+        
+        // Check preview lines
         const previewLines = previewLinesRef.current;
-        if (previewLines.length === 0) {
-          setCursor("");
-          return;
+        if (previewLines.length > 0) {
+          const slLine = previewLines[0];
+          const tpLine = previewLines[1];
+          const slPrice = slLine?.options().price ?? null;
+          const tpPrice = tpLine?.options().price ?? null;
+          
+          if (isNearPriceLine(mouseY, slPrice) || isNearPriceLine(mouseY, tpPrice)) {
+            isNearAnyLine = true;
+          }
         }
         
-        const slLine = previewLines[0];
-        const tpLine = previewLines[1];
-        const slPrice = slLine?.options().price ?? null;
-        const tpPrice = tpLine?.options().price ?? null;
-        
-        if (isNearPriceLine(mouseY, slPrice) || isNearPriceLine(mouseY, tpPrice)) {
-          setCursor("ns-resize");
-        } else {
-          setCursor("");
+        // Check all placed trade lines
+        if (!isNearAnyLine) {
+          for (const lines of priceLinesRef.current.values()) {
+            if (lines.sl) {
+              const slPrice = lines.sl.options().price;
+              if (slPrice !== null && isNearPriceLine(mouseY, slPrice)) {
+                isNearAnyLine = true;
+                break;
+              }
+            }
+            if (lines.tp) {
+              const tpPrice = lines.tp.options().price;
+              if (tpPrice !== null && isNearPriceLine(mouseY, tpPrice)) {
+                isNearAnyLine = true;
+                break;
+              }
+            }
+          }
         }
+        
+        setCursor(isNearAnyLine ? "ns-resize" : "");
       }
     };
 
     // Mouse up handler to stop dragging
     const handleMouseUp = () => {
       if (isDraggingRef.current) {
+        removeDragVisuals();
         isDraggingRef.current = false;
         dragTargetRef.current = null;
         // Re-enable chart scroll/scale after drag
@@ -276,11 +442,17 @@ export function ChartPanel({ onPriceChange, trades = [], previewTrade = null, on
       container.removeEventListener("mouseup", handleMouseUp);
       container.removeEventListener("mouseleave", handleMouseLeave);
       
+      // Cleanup tooltip if exists
+      if (tooltipRef.current && container) {
+        container.removeChild(tooltipRef.current);
+        tooltipRef.current = null;
+      }
+      
       // Cleanup all price lines
       priceLinesRef.current.forEach((lines) => {
-        lines.forEach((line) => {
-          seriesRef.current?.removePriceLine(line);
-        });
+        if (lines.entry) seriesRef.current?.removePriceLine(lines.entry);
+        if (lines.sl) seriesRef.current?.removePriceLine(lines.sl);
+        if (lines.tp) seriesRef.current?.removePriceLine(lines.tp);
       });
       priceLinesRef.current.clear();
       
@@ -307,7 +479,9 @@ export function ChartPanel({ onPriceChange, trades = [], previewTrade = null, on
     // Remove price lines for deleted trades
     currentLines.forEach((lines, tradeId) => {
       if (!tradeIds.has(tradeId)) {
-        lines.forEach((line) => series.removePriceLine(line));
+        if (lines.entry) series.removePriceLine(lines.entry);
+        if (lines.sl) series.removePriceLine(lines.sl);
+        if (lines.tp) series.removePriceLine(lines.tp);
         currentLines.delete(tradeId);
       }
     });
@@ -317,16 +491,55 @@ export function ChartPanel({ onPriceChange, trades = [], previewTrade = null, on
       const existingLines = currentLines.get(trade.id);
 
       if (existingLines) {
-        // Update existing price lines visibility
-        const [entryLine, slLine, tpLine] = existingLines;
-        entryLine.applyOptions({ lineVisible: trade.visible, axisLabelVisible: trade.visible });
-        if (slLine) slLine.applyOptions({ lineVisible: trade.visible, axisLabelVisible: trade.visible });
-        if (tpLine) tpLine.applyOptions({ lineVisible: trade.visible, axisLabelVisible: trade.visible });
+        // Update existing price lines visibility and prices
+        existingLines.entry.applyOptions({ lineVisible: trade.visible, axisLabelVisible: trade.visible });
+        if (existingLines.sl) {
+          existingLines.sl.applyOptions({ 
+            price: trade.stopLoss!,
+            lineVisible: trade.visible, 
+            axisLabelVisible: trade.visible 
+          });
+        }
+        if (existingLines.tp) {
+          existingLines.tp.applyOptions({ 
+            price: trade.takeProfit!,
+            lineVisible: trade.visible, 
+            axisLabelVisible: trade.visible 
+          });
+        }
+        
+        // Handle SL/TP addition or removal
+        if (trade.stopLoss !== null && !existingLines.sl) {
+          existingLines.sl = series.createPriceLine({
+            price: trade.stopLoss,
+            color: trade.color,
+            lineWidth: 2,
+            lineStyle: LineStyle.Dotted,
+            lineVisible: trade.visible,
+            axisLabelVisible: true,
+            title: "SL",
+          });
+        } else if (trade.stopLoss === null && existingLines.sl) {
+          series.removePriceLine(existingLines.sl);
+          existingLines.sl = null;
+        }
+        
+        if (trade.takeProfit !== null && !existingLines.tp) {
+          existingLines.tp = series.createPriceLine({
+            price: trade.takeProfit,
+            color: trade.color,
+            lineWidth: 2,
+            lineStyle: LineStyle.Dotted,
+            lineVisible: trade.visible,
+            axisLabelVisible: true,
+            title: "TP",
+          });
+        } else if (trade.takeProfit === null && existingLines.tp) {
+          series.removePriceLine(existingLines.tp);
+          existingLines.tp = null;
+        }
       } else {
         // Create new price lines
-        const lines: IPriceLine[] = [];
-
-        // Entry line
         const entryLine = series.createPriceLine({
           price: trade.entryPrice,
           color: trade.color,
@@ -336,37 +549,28 @@ export function ChartPanel({ onPriceChange, trades = [], previewTrade = null, on
           axisLabelVisible: true,
           title: "Entry",
         });
-        lines.push(entryLine);
 
-        // Stop loss line
-        if (trade.stopLoss !== null) {
-          const slLine = series.createPriceLine({
-            price: trade.stopLoss,
-            color: trade.color,
-            lineWidth: 2,
-            lineStyle: LineStyle.Dotted,
-            lineVisible: trade.visible,
-            axisLabelVisible: true,
-            title: "SL",
-          });
-          lines.push(slLine);
-        }
+        const slLine = trade.stopLoss !== null ? series.createPriceLine({
+          price: trade.stopLoss,
+          color: trade.color,
+          lineWidth: 2,
+          lineStyle: LineStyle.Dotted,
+          lineVisible: trade.visible,
+          axisLabelVisible: true,
+          title: "SL",
+        }) : null;
 
-        // Take profit line
-        if (trade.takeProfit !== null) {
-          const tpLine = series.createPriceLine({
-            price: trade.takeProfit,
-            color: trade.color,
-            lineWidth: 2,
-            lineStyle: LineStyle.Dotted,
-            lineVisible: trade.visible,
-            axisLabelVisible: true,
-            title: "TP",
-          });
-          lines.push(tpLine);
-        }
+        const tpLine = trade.takeProfit !== null ? series.createPriceLine({
+          price: trade.takeProfit,
+          color: trade.color,
+          lineWidth: 2,
+          lineStyle: LineStyle.Dotted,
+          lineVisible: trade.visible,
+          axisLabelVisible: true,
+          title: "TP",
+        }) : null;
 
-        currentLines.set(trade.id, lines);
+        currentLines.set(trade.id, { entry: entryLine, sl: slLine, tp: tpLine });
       }
     });
   }, [trades]);

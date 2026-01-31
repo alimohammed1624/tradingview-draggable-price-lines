@@ -89,6 +89,8 @@ export type PlaceTradesCardProps = {
   onSlDragHandlerReady?: (handler: (price: number) => void) => void;
   /** Registers the TP price drag handler */
   onTpDragHandlerReady?: (handler: (price: number) => void) => void;
+  /** ID of the trade currently being highlighted */
+  highlightedTradeId?: number | null;
 };
 
 export function PlaceTradesCard({ 
@@ -98,7 +100,8 @@ export function PlaceTradesCard({
   onTradeVisibilityChange,
   onPreviewTradeChange,
   onSlDragHandlerReady,
-  onTpDragHandlerReady
+  onTpDragHandlerReady,
+  highlightedTradeId
 }: PlaceTradesCardProps = {}) {
   const [lots, setLots] = React.useState(0.1);
   const [side, setSide] = React.useState<Side>("buy");
@@ -383,7 +386,15 @@ export function PlaceTradesCard({
             <div className="text-xs font-medium text-muted-foreground">Recent Trades</div>
             <div className="space-y-1.5 max-h-[200px] overflow-y-auto">
               {trades.slice().reverse().map((trade) => (
-                <div key={trade.id} className="text-xs p-2 rounded border border-border bg-muted/30">
+                <div 
+                  key={trade.id} 
+                  className={cn(
+                    "text-xs p-2 rounded border transition-all duration-200",
+                    highlightedTradeId === trade.id
+                      ? "border-primary bg-primary/10 shadow-lg scale-[1.02] animate-pulse"
+                      : "border-border bg-muted/30"
+                  )}
+                >
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-2">
                       <div 
