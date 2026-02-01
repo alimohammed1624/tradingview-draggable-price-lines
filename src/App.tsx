@@ -12,6 +12,10 @@ import {
 import { Toggle } from "@/components/ui/toggle";
 import { IconMoon, IconSun } from "@tabler/icons-react";
 import { useEffect, useRef, useState } from "react";
+import { Toaster, toast } from "sonner";
+
+// Temporary flag to enable/disable toast notifications
+const ENABLE_TOASTS = false;
 
 export function App() {
   const [livePrice, setLivePrice] = useState<number | undefined>(undefined);
@@ -49,8 +53,23 @@ export function App() {
   // Refs to store the drag handlers from PlaceTradesCard
   const slDragHandlerRef = useRef<((price: number) => void) | null>(null);
   const tpDragHandlerRef = useRef<((price: number) => void) | null>(null);
+  
+  // Ref to track recent toast notifications to prevent duplicates
+  const recentToastsRef = useRef<Record<string, number>>({});
+
+  // Helper to calculate display index (trades are shown in reverse order)
+  const getDisplayIndex = (tradeId: number) => {
+    const index = trades.findIndex((t) => t.id === tradeId);
+    return trades.length - index;
+  };
 
   const handleTradePlaced = (trade: TradeLog) => {
+    const tradeIndex = trades.length + 1;
+    if (ENABLE_TOASTS) {
+      toast.success(`Position #${tradeIndex} opened`, {
+        description: `${trade.side.toUpperCase()} ${trade.lots} lots @ ${trade.entryPrice.toFixed(5)}`,
+      });
+    }
     setTrades((prev) => [...prev, trade]);
   };
 
@@ -83,19 +102,33 @@ export function App() {
     tradeId: number,
     lineType: "sl" | "tp",
     newPrice: number,
+    isDragging: boolean = false,
   ) => {
     setTrades((prev) =>
       prev.map((trade) => {
-        const isValid = trade.id === tradeId && isValidSlTpPrice(trade, lineType, newPrice);
-        console.log(`[handleTradePriceUpdate] tradeId=${tradeId}, lineType=${lineType}, newPrice=${newPrice}, trade.side=${trade.side}, entry=${trade.entryPrice}, isValid=${isValid}`);
-        if (isValid) {
-          console.log(`[handleTradePriceUpdate] ✓ Updating ${lineType} to ${newPrice}`);
+        if (trade.id === tradeId && isValidSlTpPrice(trade, lineType, newPrice)) {
+          // Show toast notification only when dragging ends, with deduplication
+          if (!isDragging) {
+            const toastKey = `${tradeId}-${lineType}`;
+            const lastToastTime = recentToastsRef.current[toastKey] || 0;
+            const now = Date.now();
+            
+            // Only show toast if more than 300ms has passed since the last one
+            if (now - lastToastTime > 300) {
+              recentToastsRef.current[toastKey] = now;
+              if (ENABLE_TOASTS) {
+                const displayIndex = getDisplayIndex(tradeId);
+                const lineLabel = lineType === "sl" ? "SL" : "TP";
+                toast.info(`Position #${displayIndex} ${lineLabel} updated`, {
+                  description: `${lineLabel} set to ${newPrice.toFixed(5)}`,
+                });
+              }
+            }
+          }
           return {
             ...trade,
             [lineType === "sl" ? "stopLoss" : "takeProfit"]: newPrice,
           };
-        } else if (trade.id === tradeId) {
-          console.log(`[handleTradePriceUpdate] ✗ Rejecting invalid ${lineType}=${newPrice} for ${trade.side} trade with entry=${trade.entryPrice}`);
         }
         return trade;
       }),
@@ -103,6 +136,14 @@ export function App() {
   };
 
   const handleRemoveSlTp = (tradeId: number, type: "sl" | "tp") => {
+    const trade = trades.find((t) => t.id === tradeId);
+    if (trade && ENABLE_TOASTS) {
+      const displayIndex = getDisplayIndex(tradeId);
+      const typeLabel = type === "sl" ? "SL" : "TP";
+      toast.info(`Position #${displayIndex} ${typeLabel} removed`, {
+        description: `${typeLabel} has been cleared`,
+      });
+    }
     setTrades((prev) =>
       prev.map((trade) =>
         trade.id === tradeId
@@ -120,6 +161,14 @@ export function App() {
     type: "sl" | "tp",
     locked: boolean,
   ) => {
+    const trade = trades.find((t) => t.id === tradeId);
+    if (trade && ENABLE_TOASTS) {
+      const displayIndex = getDisplayIndex(tradeId);
+      const lineLabel = type === "sl" ? "SL" : "TP";
+      toast.info(`Position #${displayIndex} ${lineLabel} ${locked ? "locked" : "unlocked"}`, {
+        description: `${lineLabel} is now ${locked ? "locked" : "unlocked"}`,
+      });
+    }
     setTrades((prev) =>
       prev.map((trade) =>
         trade.id === tradeId
@@ -133,6 +182,13 @@ export function App() {
   };
 
   const handleTogglePositionLock = (tradeId: number, locked: boolean) => {
+    const trade = trades.find((t) => t.id === tradeId);
+    if (trade && ENABLE_TOASTS) {
+      const displayIndex = getDisplayIndex(tradeId);
+      toast.info(`Position #${displayIndex} ${locked ? "locked" : "unlocked"}`, {
+        description: `All lines are now ${locked ? "locked" : "unlocked"}`,
+      });
+    }
     setTrades((prev) =>
       prev.map((trade) =>
         trade.id === tradeId
@@ -148,11 +204,19 @@ export function App() {
   };
 
   const handleCloseTrade = (tradeId: number) => {
+    const trade = trades.find((t) => t.id === tradeId);
+    if (trade && ENABLE_TOASTS) {
+      const displayIndex = getDisplayIndex(tradeId);
+      toast.success(`Position #${displayIndex} closed`, {
+        description: `Trade closed`,
+      });
+    }
     setTrades((prev) => prev.filter((trade) => trade.id !== tradeId));
   };
 
   return (
     <div className="h-screen w-screen">
+      <Toaster position="top-right" />
       {/* Theme Toggle Button */}
       <Toggle
         pressed={isDark}

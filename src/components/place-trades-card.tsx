@@ -49,6 +49,10 @@ function clampPrice(value: number): number {
   return Math.max(0, value);
 }
 
+function getTradeColor(index: number): string {
+  return TRADE_COLORS[index % TRADE_COLORS.length];
+}
+
 type Side = "buy" | "sell";
 
 export type TradeLog = {
@@ -93,6 +97,7 @@ export type PlaceTradesCardProps = {
     tradeId: number,
     lineType: "sl" | "tp",
     newPrice: number,
+    isDragging?: boolean,
   ) => void;
   /** Callback when lock state changes */
   onToggleLock?: (tradeId: number, type: "sl" | "tp", locked: boolean) => void;
@@ -192,6 +197,56 @@ export function PlaceTradesCard({
     [],
   );
 
+  // Sync tradeSliders with actual trade prices when trades change
+  React.useEffect(() => {
+    setTradeSliders(prev => {
+      const updated = { ...prev };
+      let hasChanges = false;
+      
+      trades.forEach(trade => {
+        const newSliderValues: { sl?: number; tp?: number } = {};
+        
+        // Calculate slider value from actual SL price
+        if (trade.stopLoss !== null) {
+          const multiplier = trade.side === "buy"
+            ? (trade.entryPrice - trade.stopLoss) / trade.entryPrice
+            : (trade.stopLoss - trade.entryPrice) / trade.entryPrice;
+          const percent = Math.max(0.1, Math.min(100, multiplier * 100));
+          const sliderValue = percentToSlider(percent);
+          
+          if (prev[trade.id]?.sl !== sliderValue) {
+            newSliderValues.sl = sliderValue;
+            hasChanges = true;
+          } else if (prev[trade.id]?.sl !== undefined) {
+            newSliderValues.sl = prev[trade.id].sl;
+          }
+        }
+        
+        // Calculate slider value from actual TP price
+        if (trade.takeProfit !== null) {
+          const multiplier = trade.side === "buy"
+            ? (trade.takeProfit - trade.entryPrice) / trade.entryPrice
+            : (trade.entryPrice - trade.takeProfit) / trade.entryPrice;
+          const percent = Math.max(0.1, Math.min(100, multiplier * 100));
+          const sliderValue = percentToSlider(percent);
+          
+          if (prev[trade.id]?.tp !== sliderValue) {
+            newSliderValues.tp = sliderValue;
+            hasChanges = true;
+          } else if (prev[trade.id]?.tp !== undefined) {
+            newSliderValues.tp = prev[trade.id].tp;
+          }
+        }
+        
+        if (Object.keys(newSliderValues).length > 0) {
+          updated[trade.id] = newSliderValues;
+        }
+      });
+      
+      return hasChanges ? updated : prev;
+    });
+  }, [trades, percentToSlider]);
+
   const lotsDisplay = Number(lots.toFixed(2));
   const lotsLabel = lotsDisplay === 1 ? "lot" : "lots";
 
@@ -288,7 +343,7 @@ export function PlaceTradesCard({
       entryPrice: effectivePrice,
       stopLoss: slEnabled ? slPrice : null,
       takeProfit: tpEnabled ? tpPrice : null,
-      color: TRADE_COLORS[trades.length % TRADE_COLORS.length],
+      color: getTradeColor(trades.length),
       visible: true,
     };
     onTradePlaced?.(trade);
@@ -521,7 +576,7 @@ export function PlaceTradesCard({
                                 onChange={(e) => {
                                   const newPrice = parseFloat(e.target.value);
                                   if (!isNaN(newPrice) && newPrice > 0 && isValidSlTpPrice(trade, "tp", newPrice)) {
-                                    onTradePriceUpdate?.(trade.id, "tp", newPrice);
+                                    onTradePriceUpdate?.(trade.id, "tp", newPrice, false);
                                   }
                                 }}
                                 className="h-5 text-xs px-1.5 py-0 w-20"
@@ -547,6 +602,9 @@ export function PlaceTradesCard({
                                     ...prev,
                                     [trade.id]: { ...prev[trade.id], tp: sliderValue }
                                   }));
+                                }}
+                                onPointerUp={() => {
+                                  const sliderValue = tradeSliders[trade.id]?.tp ?? 33.33;
                                   const actualPercent = sliderToPercent(sliderValue);
                                   const price = calculateSlTpPrice(
                                     trade.entryPrice,
@@ -554,7 +612,7 @@ export function PlaceTradesCard({
                                     "tp",
                                     actualPercent,
                                   );
-                                  onTradePriceUpdate?.(trade.id, "tp", price);
+                                  onTradePriceUpdate?.(trade.id, "tp", price, false);
                                 }}
                                 min={0}
                                 max={100}
@@ -624,7 +682,7 @@ export function PlaceTradesCard({
                                 onChange={(e) => {
                                   const newPrice = parseFloat(e.target.value);
                                   if (!isNaN(newPrice) && newPrice > 0 && isValidSlTpPrice(trade, "sl", newPrice)) {
-                                    onTradePriceUpdate?.(trade.id, "sl", newPrice);
+                                    onTradePriceUpdate?.(trade.id, "sl", newPrice, false);
                                   }
                                 }}
                                 className="h-5 text-xs px-1.5 py-0 w-20"
@@ -650,6 +708,9 @@ export function PlaceTradesCard({
                                     ...prev,
                                     [trade.id]: { ...prev[trade.id], sl: sliderValue }
                                   }));
+                                }}
+                                onPointerUp={() => {
+                                  const sliderValue = tradeSliders[trade.id]?.sl ?? 33.33;
                                   const actualPercent = sliderToPercent(sliderValue);
                                   const price = calculateSlTpPrice(
                                     trade.entryPrice,
@@ -657,7 +718,7 @@ export function PlaceTradesCard({
                                     "sl",
                                     actualPercent,
                                   );
-                                  onTradePriceUpdate?.(trade.id, "sl", price);
+                                  onTradePriceUpdate?.(trade.id, "sl", price, false);
                                 }}
                                 min={0}
                                 max={100}

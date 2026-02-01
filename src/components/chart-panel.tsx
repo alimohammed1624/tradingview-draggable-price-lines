@@ -69,6 +69,7 @@ export type ChartPanelProps = {
     tradeId: number,
     lineType: "sl" | "tp",
     newPrice: number,
+    isDragging?: boolean,
   ) => void;
   /** Data source: simulated (default) or live EURUSD */
   dataSource?: "simulated" | "live";
@@ -500,10 +501,12 @@ export function ChartPanel({
           const target = dragTargetRef.current;
           const finalPrice = dragFinalPriceRef.current;
           if (target && target.tradeId !== "preview" && finalPrice !== null) {
+            // Pass isDragging: false to trigger toast notification
             onTradePriceUpdateRef.current?.(
               target.tradeId,
               target.type,
               finalPrice,
+              false,
             );
           }
 
