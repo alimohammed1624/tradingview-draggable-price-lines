@@ -9,7 +9,6 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { InputGroup, InputGroupInput } from "@/components/ui/input-group";
 import { Label } from "@/components/ui/label";
@@ -45,15 +44,25 @@ function roundLots(value: number): number {
   return Math.min(LOTS_MAX, Math.max(LOTS_MIN, rounded));
 }
 
-function clampPrice(value: number): number {
-  return Math.max(0, value);
-}
-
 function getTradeColor(index: number): string {
   return TRADE_COLORS[index % TRADE_COLORS.length];
 }
 
 type Side = "buy" | "sell";
+
+// A single SL or TP level with its own price, number of lots to close, and lock state
+export type SlTpLevel = {
+  id: string;           // Unique level ID (e.g., "tp-1", "sl-1")
+  price: number;        // Target price for this level
+  lots: number;         // Number of lots to close at this level
+  locked?: boolean;     // Whether this level is locked from dragging
+};
+
+// Helper to calculate remaining unallocated lots for a type
+export function getRemainingLots(levels: SlTpLevel[], totalLots: number): number {
+  const total = levels.reduce((sum, l) => sum + l.lots, 0);
+  return Math.max(0, totalLots - total);
+}
 
 export type TradeLog = {
   id: number;
@@ -61,19 +70,17 @@ export type TradeLog = {
   side: Side;
   lots: number;
   entryPrice: number;
-  stopLoss: number | null;
-  takeProfit: number | null;
+  stopLossLevels: SlTpLevel[];    // Array of SL levels (usually 1, but can be more)
+  takeProfitLevels: SlTpLevel[];  // Array of TP levels (multiple for partial closes)
   color: string;
   visible: boolean;
-  lockedSl?: boolean;
-  lockedTp?: boolean;
   lockedPosition?: boolean;
 };
 
 export type PreviewTrade = {
   entryPrice: number;
-  stopLoss: number | null;
-  takeProfit: number | null;
+  stopLossLevels: SlTpLevel[];
+  takeProfitLevels: SlTpLevel[];
   color?: string;
 };
 
@@ -87,20 +94,25 @@ export type PlaceTradesCardProps = {
   /** Callback when preview trade changes */
   onPreviewTradeChange?: (preview: PreviewTrade | null) => void;
   /** Registers the SL price drag handler */
-  onSlDragHandlerReady?: (handler: (price: number) => void) => void;
+  onSlDragHandlerReady?: (handler: (price: number, levelIndex: number) => void) => void;
   /** Registers the TP price drag handler */
-  onTpDragHandlerReady?: (handler: (price: number) => void) => void;
-  /** Callback to remove SL/TP from a trade */
-  onRemoveSlTp?: (tradeId: number, type: "sl" | "tp") => void;
-  /** Callback when trade SL/TP is updated */
+  onTpDragHandlerReady?: (handler: (price: number, levelIndex: number) => void) => void;
+  /** Callback to remove a specific level from a trade */
+  onRemoveLevel?: (tradeId: number, type: "sl" | "tp", levelId: string) => void;
+  /** Callback when trade level price is updated */
   onTradePriceUpdate?: (
     tradeId: number,
     lineType: "sl" | "tp",
+    levelId: string,
     newPrice: number,
     isDragging?: boolean,
   ) => void;
-  /** Callback when lock state changes */
-  onToggleLock?: (tradeId: number, type: "sl" | "tp", locked: boolean) => void;
+  /** Callback when level lock state changes */
+  onToggleLevelLock?: (tradeId: number, type: "sl" | "tp", levelId: string, locked: boolean) => void;
+  /** Callback when level lots changes */
+  onUpdateLevelLots?: (tradeId: number, type: "sl" | "tp", levelId: string, newLots: number) => void;
+  /** Callback to add a new level */
+  onAddLevel?: (tradeId: number, type: "sl" | "tp", price: number, lots: number) => void;
   /** Callback when position lock state changes */
   onTogglePositionLock?: (tradeId: number, locked: boolean) => void;
   /** Callback when a trade is closed */
@@ -118,9 +130,11 @@ export function PlaceTradesCard({
   onPreviewTradeChange,
   onSlDragHandlerReady,
   onTpDragHandlerReady,
-  onRemoveSlTp,
+  onRemoveLevel,
   onTradePriceUpdate,
-  onToggleLock,
+  onToggleLevelLock,
+  onUpdateLevelLots,
+  onAddLevel,
   onTogglePositionLock,
   onCloseTrade,
   dataSource = "simulated",
@@ -131,13 +145,41 @@ export function PlaceTradesCard({
   const [currentPrice, _setCurrentPrice] = React.useState(1.0);
   const [slEnabled, setSlEnabled] = React.useState(false);
   const [tpEnabled, setTpEnabled] = React.useState(false);
-  const [slSliderValue, setSlSliderValue] = React.useState(33.33);
-  const [tpSliderValue, setTpSliderValue] = React.useState(33.33);
-  
-  // Track slider values for each trade's SL/TP
-  const [tradeSliders, setTradeSliders] = React.useState<Record<number, { sl?: number; tp?: number }>>({});
+
+  // Multi-level SL/TP for position creation
+  const [creationSlLevels, setCreationSlLevels] = React.useState<SlTpLevel[]>([]);
+  const [creationTpLevels, setCreationTpLevels] = React.useState<SlTpLevel[]>([]);
+
+  // Track slider values for creation levels: { levelId: sliderValue }
+  const [creationSliders, setCreationSliders] = React.useState<Record<string, number>>({});
+
+  // Track slider values for each trade's SL/TP levels: { tradeId: { levelId: sliderValue } }
+  const [tradeSliders, setTradeSliders] = React.useState<Record<number, Record<string, number>>>({});
 
   const effectivePrice = livePrice ?? currentPrice;
+
+  // Auto-create first level when enabling TP/SL with a default 2% distance
+  React.useEffect(() => {
+    if (tpEnabled && creationTpLevels.length === 0) {
+      setCreationTpLevels([{
+        id: `tp-1`,
+        price: calculateSlTpPrice(effectivePrice, side, "tp", 2),
+        lots: lots,
+        locked: false,
+      }]);
+    }
+  }, [tpEnabled, lots, effectivePrice, side]);
+
+  React.useEffect(() => {
+    if (slEnabled && creationSlLevels.length === 0) {
+      setCreationSlLevels([{
+        id: `sl-1`,
+        price: calculateSlTpPrice(effectivePrice, side, "sl", 2),
+        lots: lots,
+        locked: false,
+      }]);
+    }
+  }, [slEnabled, lots, effectivePrice, side]);
 
   // Convert linear slider value (0-100) to logarithmic percentage (0.1-100)
   const sliderToPercent = React.useCallback((sliderValue: number): number => {
@@ -155,9 +197,10 @@ export function PlaceTradesCard({
     return (Math.log(percent / minPercent) / Math.log(ratio)) * 100;
   }, []);
 
-  // Calculate percentages from slider values
-  const slPercent = sliderToPercent(slSliderValue);
-  const tpPercent = sliderToPercent(tpSliderValue);
+  // Calculate distance percentages from slider values (for price calculation)
+  // NOTE: These are no longer used for the default SL/TP, but may be useful for reference
+  // const slDistancePercent = sliderToPercent(slSliderValue);
+  // const tpDistancePercent = sliderToPercent(tpSliderValue);
 
   // Calculate SL/TP price from entry price and percentage
   const calculateSlTpPrice = React.useCallback(
@@ -197,120 +240,127 @@ export function PlaceTradesCard({
     [],
   );
 
-  // Sync tradeSliders with actual trade prices when trades change
+  // Sync tradeSliders with actual trade level prices when trades change
   React.useEffect(() => {
     setTradeSliders(prev => {
       const updated = { ...prev };
       let hasChanges = false;
       
       trades.forEach(trade => {
-        const newSliderValues: { sl?: number; tp?: number } = {};
+        if (!updated[trade.id]) {
+          updated[trade.id] = {};
+        }
+        const tradeSliderValues = { ...updated[trade.id] };
         
-        // Calculate slider value from actual SL price
-        if (trade.stopLoss !== null) {
+        // Calculate slider values from SL levels
+        trade.stopLossLevels.forEach(level => {
           const multiplier = trade.side === "buy"
-            ? (trade.entryPrice - trade.stopLoss) / trade.entryPrice
-            : (trade.stopLoss - trade.entryPrice) / trade.entryPrice;
+            ? (trade.entryPrice - level.price) / trade.entryPrice
+            : (level.price - trade.entryPrice) / trade.entryPrice;
           const percent = Math.max(0.1, Math.min(100, multiplier * 100));
           const sliderValue = percentToSlider(percent);
           
-          if (prev[trade.id]?.sl !== sliderValue) {
-            newSliderValues.sl = sliderValue;
+          if (prev[trade.id]?.[level.id] !== sliderValue) {
+            tradeSliderValues[level.id] = sliderValue;
             hasChanges = true;
-          } else if (prev[trade.id]?.sl !== undefined) {
-            newSliderValues.sl = prev[trade.id].sl;
           }
-        }
+        });
         
-        // Calculate slider value from actual TP price
-        if (trade.takeProfit !== null) {
+        // Calculate slider values from TP levels
+        trade.takeProfitLevels.forEach(level => {
           const multiplier = trade.side === "buy"
-            ? (trade.takeProfit - trade.entryPrice) / trade.entryPrice
-            : (trade.entryPrice - trade.takeProfit) / trade.entryPrice;
+            ? (level.price - trade.entryPrice) / trade.entryPrice
+            : (trade.entryPrice - level.price) / trade.entryPrice;
           const percent = Math.max(0.1, Math.min(100, multiplier * 100));
           const sliderValue = percentToSlider(percent);
           
-          if (prev[trade.id]?.tp !== sliderValue) {
-            newSliderValues.tp = sliderValue;
+          if (prev[trade.id]?.[level.id] !== sliderValue) {
+            tradeSliderValues[level.id] = sliderValue;
             hasChanges = true;
-          } else if (prev[trade.id]?.tp !== undefined) {
-            newSliderValues.tp = prev[trade.id].tp;
           }
-        }
+        });
         
-        if (Object.keys(newSliderValues).length > 0) {
-          updated[trade.id] = newSliderValues;
-        }
+        updated[trade.id] = tradeSliderValues;
       });
       
       return hasChanges ? updated : prev;
     });
   }, [trades, percentToSlider]);
 
+  // Sync creationSliders with creation level prices
+  React.useEffect(() => {
+    setCreationSliders(prev => {
+      const updated = { ...prev };
+      let hasChanges = false;
+
+      creationSlLevels.forEach(level => {
+        const multiplier = side === "buy"
+          ? (effectivePrice - level.price) / effectivePrice
+          : (level.price - effectivePrice) / effectivePrice;
+        const percent = Math.max(0.1, Math.min(100, multiplier * 100));
+        const sliderValue = percentToSlider(percent);
+        if (prev[level.id] !== sliderValue) {
+          updated[level.id] = sliderValue;
+          hasChanges = true;
+        }
+      });
+
+      creationTpLevels.forEach(level => {
+        const multiplier = side === "buy"
+          ? (level.price - effectivePrice) / effectivePrice
+          : (effectivePrice - level.price) / effectivePrice;
+        const percent = Math.max(0.1, Math.min(100, multiplier * 100));
+        const sliderValue = percentToSlider(percent);
+        if (prev[level.id] !== sliderValue) {
+          updated[level.id] = sliderValue;
+          hasChanges = true;
+        }
+      });
+
+      return hasChanges ? updated : prev;
+    });
+  }, [creationSlLevels, creationTpLevels, effectivePrice, side, percentToSlider]);
+
   const lotsDisplay = Number(lots.toFixed(2));
   const lotsLabel = lotsDisplay === 1 ? "lot" : "lots";
 
-  // SL/TP prices from effective (live or manual) price and %; cap at 0.00
-  const slPrice = clampPrice(
-    side === "buy"
-      ? effectivePrice * (1 - slPercent / 100)
-      : effectivePrice * (1 + slPercent / 100),
-  );
-  const tpPrice = clampPrice(
-    side === "buy"
-      ? effectivePrice * (1 + tpPercent / 100)
-      : effectivePrice * (1 - tpPercent / 100),
-  );
+  // SL/TP prices are now computed from creation levels
+  // The old single-level preview is no longer used
+  const slPrice = creationSlLevels.length > 0 ? creationSlLevels[0].price : effectivePrice * 0.98;
+  const tpPrice = creationTpLevels.length > 0 ? creationTpLevels[0].price : effectivePrice * 1.02;
 
-
-
-  // Update preview trade whenever relevant state changes
-  React.useEffect(() => {
-    if (livePrice === undefined) {
-      onPreviewTradeChange?.(null);
-      return;
-    }
-    onPreviewTradeChange?.({
-      entryPrice: effectivePrice,
-      stopLoss: slEnabled ? slPrice : null,
-      takeProfit: tpEnabled ? tpPrice : null,
-    });
-  }, [
-    effectivePrice,
-    slPrice,
-    tpPrice,
-    slEnabled,
-    tpEnabled,
-    livePrice,
-    onPreviewTradeChange,
-  ]);
+  // Remove old preview trade update effect - replaced by the one using creation levels below
 
 
 
   const setSlPercentFromPrice = React.useCallback(
-    (price: number) => {
+    (price: number, levelIndex: number) => {
       if (effectivePrice <= 0) return;
-      const pct =
-        side === "buy"
-          ? ((effectivePrice - price) / effectivePrice) * 100
-          : ((price - effectivePrice) / effectivePrice) * 100;
-      const clampedPct = Math.max(0.1, Math.min(100, pct));
-      setSlSliderValue(percentToSlider(clampedPct));
+      const newLevels = [...creationSlLevels];
+      if (newLevels[levelIndex]) {
+        newLevels[levelIndex] = {
+          ...newLevels[levelIndex],
+          price,
+        };
+        setCreationSlLevels(newLevels);
+      }
     },
-    [effectivePrice, side, percentToSlider],
+    [effectivePrice, creationSlLevels],
   );
 
   const setTpPercentFromPrice = React.useCallback(
-    (price: number) => {
+    (price: number, levelIndex: number) => {
       if (effectivePrice <= 0) return;
-      const pct =
-        side === "buy"
-          ? ((price - effectivePrice) / effectivePrice) * 100
-          : ((effectivePrice - price) / effectivePrice) * 100;
-      const clampedPct = Math.max(0.1, Math.min(100, pct));
-      setTpSliderValue(percentToSlider(clampedPct));
+      const newLevels = [...creationTpLevels];
+      if (newLevels[levelIndex]) {
+        newLevels[levelIndex] = {
+          ...newLevels[levelIndex],
+          price,
+        };
+        setCreationTpLevels(newLevels);
+      }
     },
-    [effectivePrice, side, percentToSlider],
+    [effectivePrice, creationTpLevels],
   );
 
 
@@ -324,6 +374,20 @@ export function PlaceTradesCard({
   React.useEffect(() => {
     onTpDragHandlerReady?.(setTpPercentFromPrice);
   }, [onTpDragHandlerReady, setTpPercentFromPrice]);
+
+  // Update preview trade whenever creation levels change
+  React.useEffect(() => {
+    if (tpEnabled || slEnabled) {
+      onPreviewTradeChange?.({
+        entryPrice: effectivePrice,
+        stopLossLevels: creationSlLevels,
+        takeProfitLevels: creationTpLevels,
+        color: TRADE_COLORS[0],
+      });
+    } else {
+      onPreviewTradeChange?.(null);
+    }
+  }, [tpEnabled, slEnabled, creationTpLevels, creationSlLevels, effectivePrice, onPreviewTradeChange]);
 
   const slTpLabel = [
     slEnabled && `SL: ${slPrice.toFixed(4)}`,
@@ -341,14 +405,16 @@ export function PlaceTradesCard({
       side,
       lots,
       entryPrice: effectivePrice,
-      stopLoss: slEnabled ? slPrice : null,
-      takeProfit: tpEnabled ? tpPrice : null,
+      stopLossLevels: creationSlLevels,
+      takeProfitLevels: creationTpLevels,
       color: getTradeColor(trades.length),
       visible: true,
     };
     onTradePlaced?.(trade);
     setSlEnabled(false);
     setTpEnabled(false);
+    setCreationSlLevels([]);
+    setCreationTpLevels([]);
   };
 
   return (
@@ -409,7 +475,14 @@ export function PlaceTradesCard({
             <Button
               type="button"
               className="flex-1 bg-green-600 hover:bg-green-700 text-white border-green-700 dark:bg-green-700 dark:hover:bg-green-600"
-              onClick={() => setSide("buy")}
+              onClick={() => {
+                setSide("buy");
+                setSlEnabled(false);
+                setTpEnabled(false);
+                setCreationSlLevels([]);
+                setCreationTpLevels([]);
+                setCreationSliders({});
+              }}
             >
               BUY
             </Button>
@@ -417,77 +490,311 @@ export function PlaceTradesCard({
               type="button"
               variant="destructive"
               className="flex-1 bg-red-600 hover:bg-red-700 text-white border-red-700 dark:bg-red-700 dark:hover:bg-red-600"
-              onClick={() => setSide("sell")}
+              onClick={() => {
+                setSide("sell");
+                setSlEnabled(false);
+                setTpEnabled(false);
+                setCreationSlLevels([]);
+                setCreationTpLevels([]);
+                setCreationSliders({});
+              }}
             >
               SELL
             </Button>
           </ButtonGroup>
         </div>
 
-        {/* 3. Take Profit checkbox */}
-        <div className="flex items-center gap-2">
-          <Checkbox
-            id="tp"
-            checked={tpEnabled}
-            onCheckedChange={(checked) => setTpEnabled(checked === true)}
-          />
-          <Label htmlFor="tp" className="cursor-pointer text-sm font-medium">
-            Take Profit
-          </Label>
-        </div>
-
-        {/* 3.1 TP section with logarithmic slider */}
-        {tpEnabled && (
-          <div className="space-y-2 pl-6 border-l-2 border-muted">
-            <div className="flex items-center justify-between">
-              <Label>Distance: {tpPercent.toFixed(2)}%</Label>
-              <span className="text-sm text-muted-foreground">
-                {tpPrice.toFixed(5)}
-              </span>
-            </div>
-            <Slider
-              value={[tpSliderValue]}
-              min={0}
-              max={100}
-              step={0.01}
-              onValueChange={([value]) => setTpSliderValue(value)}
-            />
+        {/* 3. Take Profit section */}
+        {!tpEnabled ? (
+          <Button
+            type="button"
+            variant="outline"
+            className="w-full"
+            onClick={() => setTpEnabled(true)}
+          >
+            Add TP
+          </Button>
+        ) : (
+          <div className="space-y-2 pl-6 border-l-2 border-green-500/30">
+            <div className="text-xs font-medium text-foreground">Take Profit</div>
+            {creationTpLevels.map((level, idx) => (
+              <div key={level.id} className="space-y-1 p-2 bg-muted/30 rounded">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-1 w-[4.5rem]">
+                    <span className="text-xs font-semibold whitespace-nowrap">#{idx + 1}</span>
+                    <Input
+                      type="text"
+                      value={level.price.toFixed(5)}
+                      onChange={(e) => {
+                        const newPrice = parseFloat(e.target.value);
+                        if (!isNaN(newPrice) && newPrice > 0) {
+                          const newLevels = [...creationTpLevels];
+                          newLevels[idx] = { ...level, price: newPrice };
+                          setCreationTpLevels(newLevels);
+                        }
+                      }}
+                      className="h-5 text-xs px-1 py-0 w-16"
+                    />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <Slider
+                      value={[creationSliders[level.id] ?? 33.33]}
+                      onValueChange={(value) => {
+                        setCreationSliders(prev => ({
+                          ...prev,
+                          [level.id]: value[0]
+                        }));
+                      }}
+                      onPointerUp={() => {
+                        const sliderValue = creationSliders[level.id] ?? 33.33;
+                        const actualPercent = sliderToPercent(sliderValue);
+                        const newPrice = calculateSlTpPrice(effectivePrice, side, "tp", actualPercent);
+                        const newLevels = [...creationTpLevels];
+                        newLevels[idx] = { ...level, price: newPrice };
+                        setCreationTpLevels(newLevels);
+                      }}
+                      min={0}
+                      max={100}
+                      step={0.1}
+                      className="w-full"
+                    />
+                  </div>
+                  <div className="w-[2.5rem] text-right">
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="h-4 w-4 p-0 text-destructive hover:bg-destructive/10"
+                      onClick={() => {
+                        const newLevels = creationTpLevels.filter((_, i) => i !== idx);
+                        setCreationTpLevels(newLevels);
+                        if (newLevels.length === 0) {
+                          setTpEnabled(false);
+                        }
+                        // Clean up sliders
+                        setCreationSliders(prev => {
+                          const updated = { ...prev };
+                          delete updated[level.id];
+                          return updated;
+                        });
+                      }}
+                    >
+                      <IconX size={10} />
+                    </Button>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-0.5 w-[4.5rem]">
+                    <Input
+                      type="text"
+                      value={level.lots.toFixed(2)}
+                      onChange={(e) => {
+                        const newLots = Math.min(lots, Math.max(0.01, parseFloat(e.target.value) || 0));
+                        const newLevels = [...creationTpLevels];
+                        newLevels[idx] = { ...level, lots: newLots };
+                        setCreationTpLevels(newLevels);
+                      }}
+                      className="h-5 text-xs px-1 py-0 w-10"
+                    />
+                    <span className="text-xs">Lots</span>
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <Slider
+                      value={[level.lots]}
+                      min={0.01}
+                      max={getRemainingLots(creationTpLevels, lots) + level.lots}
+                      step={0.01}
+                      onValueChange={([value]) => {
+                        const newLevels = [...creationTpLevels];
+                        newLevels[idx] = { ...level, lots: value };
+                        setCreationTpLevels(newLevels);
+                      }}
+                      onPointerUp={() => {
+                        // Value is already updated via onValueChange
+                      }}
+                      className="w-full"
+                    />
+                  </div>
+                  <div className="w-[2.5rem]"></div>
+                </div>
+              </div>
+            ))}
+            {getRemainingLots(creationTpLevels, lots) > 0 && (
+              <div className="flex items-center gap-2 pl-2">
+                <span className="text-xs text-muted-foreground">
+                  Remaining: {getRemainingLots(creationTpLevels, lots).toFixed(2)} Lots
+                </span>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-5 text-xs px-2"
+                  onClick={() => {
+                    const newLevel: SlTpLevel = {
+                      id: `tp-${creationTpLevels.length + 1}`,
+                      price: tpPrice,
+                      lots: getRemainingLots(creationTpLevels, lots),
+                      locked: false,
+                    };
+                    setCreationTpLevels([...creationTpLevels, newLevel]);
+                  }}
+                >
+                  + Add TP Level
+                </Button>
+              </div>
+            )}
           </div>
         )}
 
-        {/* 4. Stop Loss checkbox */}
-        <div className="flex items-center gap-2">
-          <Checkbox
-            id="sl"
-            checked={slEnabled}
-            onCheckedChange={(checked) => setSlEnabled(checked === true)}
-          />
-          <Label htmlFor="sl" className="cursor-pointer text-sm font-medium">
-            Stop Loss
-          </Label>
-        </div>
-
-        {/* 4.1 SL section with logarithmic slider */}
-        {slEnabled && (
-          <div className="space-y-2 pl-6 border-l-2 border-muted">
-            <div className="flex items-center justify-between">
-              <Label>Distance: {slPercent.toFixed(2)}%</Label>
-              <span className="text-sm text-muted-foreground">
-                {slPrice.toFixed(5)}
-              </span>
-            </div>
-            <Slider
-              value={[slSliderValue]}
-              min={0}
-              max={100}
-              step={0.01}
-              onValueChange={([value]) => setSlSliderValue(value)}
-            />
+        {/* 4. Stop Loss section */}
+        {!slEnabled ? (
+          <Button
+            type="button"
+            variant="outline"
+            className="w-full"
+            onClick={() => setSlEnabled(true)}
+          >
+            Add SL
+          </Button>
+        ) : (
+          <div className="space-y-2 pl-6 border-l-2 border-red-500/30">
+            <div className="text-xs font-medium text-foreground">Stop Loss</div>
+            {creationSlLevels.map((level, idx) => (
+              <div key={level.id} className="space-y-1 p-2 bg-muted/30 rounded">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-1 w-[4.5rem]">
+                    <span className="text-xs font-semibold whitespace-nowrap">#{idx + 1}</span>
+                    <Input
+                      type="text"
+                      value={level.price.toFixed(5)}
+                      onChange={(e) => {
+                        const newPrice = parseFloat(e.target.value);
+                        if (!isNaN(newPrice) && newPrice > 0) {
+                          const newLevels = [...creationSlLevels];
+                          newLevels[idx] = { ...level, price: newPrice };
+                          setCreationSlLevels(newLevels);
+                        }
+                      }}
+                      className="h-5 text-xs px-1 py-0 w-16"
+                    />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <Slider
+                      value={[creationSliders[level.id] ?? 33.33]}
+                      onValueChange={(value) => {
+                        setCreationSliders(prev => ({
+                          ...prev,
+                          [level.id]: value[0]
+                        }));
+                      }}
+                      onPointerUp={() => {
+                        const sliderValue = creationSliders[level.id] ?? 33.33;
+                        const actualPercent = sliderToPercent(sliderValue);
+                        const newPrice = calculateSlTpPrice(effectivePrice, side, "sl", actualPercent);
+                        const newLevels = [...creationSlLevels];
+                        newLevels[idx] = { ...level, price: newPrice };
+                        setCreationSlLevels(newLevels);
+                      }}
+                      min={0}
+                      max={100}
+                      step={0.1}
+                      className="w-full"
+                    />
+                  </div>
+                  <div className="w-[2.5rem] text-right">
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="h-4 w-4 p-0 text-destructive hover:bg-destructive/10"
+                      onClick={() => {
+                        const newLevels = creationSlLevels.filter((_, i) => i !== idx);
+                        setCreationSlLevels(newLevels);
+                        if (newLevels.length === 0) {
+                          setSlEnabled(false);
+                        }
+                        // Clean up sliders
+                        setCreationSliders(prev => {
+                          const updated = { ...prev };
+                          delete updated[level.id];
+                          return updated;
+                        });
+                      }}
+                    >
+                      <IconX size={10} />
+                    </Button>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-0.5 w-[4.5rem]">
+                    <Input
+                      type="text"
+                      value={level.lots.toFixed(2)}
+                      onChange={(e) => {
+                        const newLots = Math.min(lots, Math.max(0.01, parseFloat(e.target.value) || 0));
+                        const newLevels = [...creationSlLevels];
+                        newLevels[idx] = { ...level, lots: newLots };
+                        setCreationSlLevels(newLevels);
+                      }}
+                      className="h-5 text-xs px-1 py-0 w-10"
+                    />
+                    <span className="text-xs">Lots</span>
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <Slider
+                      value={[level.lots]}
+                      min={0.01}
+                      max={getRemainingLots(creationSlLevels, lots) + level.lots}
+                      step={0.01}
+                      onValueChange={([value]) => {
+                        const newLevels = [...creationSlLevels];
+                        newLevels[idx] = { ...level, lots: value };
+                        setCreationSlLevels(newLevels);
+                      }}
+                      onPointerUp={() => {
+                        // Value is already updated via onValueChange
+                      }}
+                      className="w-full"
+                    />
+                  </div>
+                  <div className="w-[2.5rem]"></div>
+                </div>
+              </div>
+            ))}
+            {getRemainingLots(creationSlLevels, lots) > 0 && (
+              <div className="flex items-center gap-2 pl-2">
+                <span className="text-xs text-muted-foreground">
+                  Remaining: {getRemainingLots(creationSlLevels, lots).toFixed(2)} Lots
+                </span>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-5 text-xs px-2"
+                  onClick={() => {
+                    const newLevel: SlTpLevel = {
+                      id: `sl-${creationSlLevels.length + 1}`,
+                      price: slPrice,
+                      lots: getRemainingLots(creationSlLevels, lots),
+                      locked: false,
+                    };
+                    setCreationSlLevels([...creationSlLevels, newLevel]);
+                  }}
+                >
+                  + Add SL Level
+                </Button>
+              </div>
+            )}
           </div>
         )}
       </CardContent>
       <CardFooter className="flex flex-col gap-2">
-        <Button type="button" className="w-full" onClick={handlePlaceTrade}>
+        <Button
+          type="button"
+          className={cn(
+            "w-full",
+            side === "buy"
+              ? "bg-green-600 hover:bg-green-700 text-white border-green-700 dark:bg-green-700 dark:hover:bg-green-600"
+              : "bg-red-600 hover:bg-red-700 text-white border-red-700 dark:bg-red-700 dark:hover:bg-red-600",
+          )}
+          onClick={handlePlaceTrade}
+        >
           {actionLabel}
         </Button>
         {trades.length > 0 && (
@@ -563,254 +870,339 @@ export function PlaceTradesCard({
                     </div>
                     <div className="mt-1 space-y-1.5 text-muted-foreground">
                       <div>Entry: {trade.entryPrice.toFixed(5)}</div>
-                      {trade.takeProfit && (
+                      
+                      {/* Take Profit Levels */}
+                      {trade.takeProfitLevels.length > 0 && (
                         <div className="space-y-1">
-                          <div className="flex items-center gap-2">
-                            <div className="flex items-center gap-1">
-                              <span className="text-xs whitespace-nowrap">TP:</span>
-                              <Input
-                                type="text"
-                                step="0.00001"
-                                disabled={trade.lockedTp}
-                                value={trade.takeProfit.toFixed(5)}
-                                onChange={(e) => {
-                                  const newPrice = parseFloat(e.target.value);
-                                  if (!isNaN(newPrice) && newPrice > 0 && isValidSlTpPrice(trade, "tp", newPrice)) {
-                                    onTradePriceUpdate?.(trade.id, "tp", newPrice, false);
-                                  }
-                                }}
-                                className="h-5 text-xs px-1.5 py-0 w-20"
-                              />
+                          <div className="text-xs font-medium text-foreground">Take Profit</div>
+                          {trade.takeProfitLevels.map((level, levelIndex) => (
+                            <div key={level.id} className="space-y-1 pl-2 border-l border-green-500/50">
+                              <div className="flex items-center gap-2">
+                              <div className="flex items-center gap-1 w-[4.5rem]">
+                                <span className="text-xs whitespace-nowrap">#{levelIndex + 1}</span>
+                                <Input
+                                  type="text"
+                                  disabled={level.locked}
+                                  value={level.price.toFixed(5)}
+                                  onChange={(e) => {
+                                    const newPrice = parseFloat(e.target.value);
+                                    if (!isNaN(newPrice) && newPrice > 0 && isValidSlTpPrice(trade, "tp", newPrice)) {
+                                      onTradePriceUpdate?.(trade.id, "tp", level.id, newPrice, false);
+                                    }
+                                  }}
+                                  className="h-5 text-xs px-1 py-0 w-16"
+                                />
+                              </div>
+                              <div className="flex-1 min-w-0">
+                                <Slider
+                                  disabled={level.locked}
+                                  value={[
+                                    tradeSliders[trade.id]?.[level.id] ??
+                                    (() => {
+                                      const multiplier = trade.side === "buy"
+                                        ? (level.price - trade.entryPrice) / trade.entryPrice
+                                        : (trade.entryPrice - level.price) / trade.entryPrice;
+                                      const percent = Math.max(0.1, Math.min(100, multiplier * 100));
+                                      return percentToSlider(percent);
+                                    })()
+                                  ]}
+                                  onValueChange={(value) => {
+                                    if (level.locked) return;
+                                    setTradeSliders(prev => ({
+                                      ...prev,
+                                      [trade.id]: { ...prev[trade.id], [level.id]: value[0] }
+                                    }));
+                                  }}
+                                  onPointerUp={() => {
+                                    const sliderValue = tradeSliders[trade.id]?.[level.id] ?? 33.33;
+                                    const actualPercent = sliderToPercent(sliderValue);
+                                    const price = calculateSlTpPrice(trade.entryPrice, trade.side, "tp", actualPercent);
+                                    onTradePriceUpdate?.(trade.id, "tp", level.id, price, false);
+                                  }}
+                                  min={0}
+                                  max={100}
+                                  step={0.1}
+                                  className="w-full"
+                                />
+                              </div>
+                              <div className="flex items-center gap-0.5">
+                                <TooltipProvider>
+                                  <Tooltip>
+                                    <TooltipTrigger asChild>
+                                      <Button
+                                        size="sm"
+                                        variant="ghost"
+                                        className="h-4 w-4 p-0 hover:bg-muted"
+                                        onClick={() => onToggleLevelLock?.(trade.id, "tp", level.id, !level.locked)}
+                                      >
+                                        {level.locked ? <IconLock size={10} /> : <IconLockOpen size={10} />}
+                                      </Button>
+                                    </TooltipTrigger>
+                                    <TooltipContent>{level.locked ? "Unlock" : "Lock"}</TooltipContent>
+                                  </Tooltip>
+                                </TooltipProvider>
+                                <TooltipProvider>
+                                  <Tooltip>
+                                    <TooltipTrigger asChild>
+                                      <Button
+                                        size="sm"
+                                        variant="ghost"
+                                        className="h-4 w-4 p-0 text-destructive hover:bg-destructive/10"
+                                        onClick={() => {
+                                          onRemoveLevel?.(trade.id, "tp", level.id);
+                                          setTradeSliders(prev => {
+                                            const tradeLevelSliders = { ...prev[trade.id] };
+                                            delete tradeLevelSliders[level.id];
+                                            return { ...prev, [trade.id]: tradeLevelSliders };
+                                          });
+                                        }}
+                                      >
+                                        <IconTrash size={10} />
+                                      </Button>
+                                    </TooltipTrigger>
+                                    <TooltipContent>Remove</TooltipContent>
+                                  </Tooltip>
+                                </TooltipProvider>
+                              </div>
                             </div>
-                            <div className="flex-1 min-w-0">
-                              <Slider
-                                disabled={trade.lockedTp}
-                                value={[
-                                  tradeSliders[trade.id]?.tp ??
-                                  (() => {
-                                    const multiplier = trade.side === "buy"
-                                      ? (trade.takeProfit - trade.entryPrice) / trade.entryPrice
-                                      : (trade.entryPrice - trade.takeProfit) / trade.entryPrice;
-                                    const percent = Math.max(0.1, Math.min(100, multiplier * 100));
-                                    return percentToSlider(percent);
-                                  })()
-                                ]}
-                                onValueChange={(value) => {
-                                  if (trade.lockedTp) return;
-                                  const sliderValue = value[0];
-                                  setTradeSliders(prev => ({
-                                    ...prev,
-                                    [trade.id]: { ...prev[trade.id], tp: sliderValue }
-                                  }));
-                                }}
-                                onPointerUp={() => {
-                                  const sliderValue = tradeSliders[trade.id]?.tp ?? 33.33;
-                                  const actualPercent = sliderToPercent(sliderValue);
-                                  const price = calculateSlTpPrice(
-                                    trade.entryPrice,
-                                    trade.side,
-                                    "tp",
-                                    actualPercent,
-                                  );
-                                  onTradePriceUpdate?.(trade.id, "tp", price, false);
-                                }}
-                                min={0}
-                                max={100}
-                                step={0.1}
-                                className="w-full"
-                              />
+                            <div className="flex items-center gap-2">
+                              <div className="flex items-center gap-0.5 w-[4.5rem]">
+                                <Input
+                                  type="text"
+                                  disabled={level.locked}
+                                  value={level.lots.toFixed(2)}
+                                  onChange={(e) => {
+                                    const newLots = Math.min(trade.lots, Math.max(0.01, parseFloat(e.target.value) || 0));
+                                    onUpdateLevelLots?.(trade.id, "tp", level.id, newLots);
+                                  }}
+                                  className="h-5 text-xs px-1 py-0 w-10"
+                                />
+                                <span className="text-xs">Lots</span>
+                              </div>
+                              <div className="flex-1 min-w-0">
+                                <Slider
+                                  disabled={level.locked}
+                                  value={[level.lots]}
+                                  min={0.01}
+                                  max={getRemainingLots(trade.takeProfitLevels, trade.lots) + level.lots}
+                                  step={0.01}
+                                  onValueChange={([value]) => {
+                                    if (level.locked) return;
+                                    onUpdateLevelLots?.(trade.id, "tp", level.id, value);
+                                  }}
+                                  onPointerUp={() => {
+                                    // Value is already updated via onValueChange
+                                  }}
+                                  className="w-full"
+                                />
+                              </div>
+                              <div className="w-[2.5rem]"></div>
                             </div>
-                            <div className="flex items-center gap-1">
-                              <TooltipProvider>
-                                <Tooltip>
-                                  <TooltipTrigger asChild>
-                                    <Button
-                                      size="sm"
-                                      variant="ghost"
-                                      className="h-4 w-4 p-0 hover:bg-muted"
-                                      onClick={() => {
-                                        onToggleLock?.(trade.id, "tp", !trade.lockedTp);
-                                      }}
-                                    >
-                                      {trade.lockedTp ? (
-                                        <IconLock size={10} />
-                                      ) : (
-                                        <IconLockOpen size={10} />
-                                      )}
-                                    </Button>
-                                  </TooltipTrigger>
-                                  <TooltipContent>
-                                    {trade.lockedTp ? "Unlock TP" : "Lock TP"}
-                                  </TooltipContent>
-                                </Tooltip>
-                              </TooltipProvider>
-                              <TooltipProvider>
-                                <Tooltip>
-                                  <TooltipTrigger asChild>
-                                    <Button
-                                      size="sm"
-                                      variant="ghost"
-                                      className="h-4 w-4 p-0 text-destructive hover:bg-destructive/10"
-                                      onClick={() => {
-                                        onRemoveSlTp?.(trade.id, "tp");
-                                        setTradeSliders(prev => {
-                                          const { [trade.id]: _, ...rest } = prev;
-                                          return rest;
-                                        });
-                                      }}
-                                    >
-                                      <IconTrash size={10} />
-                                    </Button>
-                                  </TooltipTrigger>
-                                  <TooltipContent>Remove TP</TooltipContent>
-                                </Tooltip>
-                              </TooltipProvider>
                             </div>
-                          </div>
+                          ))}
+                          {getRemainingLots(trade.takeProfitLevels, trade.lots) > 0 && (
+                            <div className="flex items-center gap-2 pl-2">
+                              <span className="text-xs text-muted-foreground">
+                                Remaining: {getRemainingLots(trade.takeProfitLevels, trade.lots).toFixed(2)} Lots
+                              </span>
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                className="h-5 text-xs px-2"
+                                onClick={() => {
+                                  const lastLevel = trade.takeProfitLevels[trade.takeProfitLevels.length - 1];
+                                  const basePrice = lastLevel ? lastLevel.price : trade.entryPrice;
+                                  const offset = trade.side === "buy" ? 0.001 : -0.001;
+                                  const newPrice = basePrice + offset;
+                                  onAddLevel?.(trade.id, "tp", newPrice, getRemainingLots(trade.takeProfitLevels, trade.lots));
+                                }}
+                              >
+                                + Add TP Level
+                              </Button>
+                            </div>
+                          )}
                         </div>
                       )}
-                      {trade.stopLoss && (
+                      
+                      {/* Stop Loss Levels */}
+                      {trade.stopLossLevels.length > 0 && (
                         <div className="space-y-1">
-                          <div className="flex items-center gap-2">
-                            <div className="flex items-center gap-1">
-                              <span className="text-xs whitespace-nowrap">SL:</span>
-                              <Input
-                                type="text"
-                                step="0.00001"
-                                disabled={trade.lockedSl}
-                                value={trade.stopLoss.toFixed(5)}
-                                onChange={(e) => {
-                                  const newPrice = parseFloat(e.target.value);
-                                  if (!isNaN(newPrice) && newPrice > 0 && isValidSlTpPrice(trade, "sl", newPrice)) {
-                                    onTradePriceUpdate?.(trade.id, "sl", newPrice, false);
-                                  }
-                                }}
-                                className="h-5 text-xs px-1.5 py-0 w-20"
-                              />
+                          <div className="text-xs font-medium text-foreground">Stop Loss</div>
+                          {trade.stopLossLevels.map((level, levelIndex) => (
+                            <div key={level.id} className="space-y-1 pl-2 border-l border-red-500/50">
+                              <div className="flex items-center gap-2">
+                              <div className="flex items-center gap-1 w-[4.5rem]">
+                                <span className="text-xs whitespace-nowrap">#{levelIndex + 1}</span>
+                                <Input
+                                  type="text"
+                                  disabled={level.locked}
+                                  value={level.price.toFixed(5)}
+                                  onChange={(e) => {
+                                    const newPrice = parseFloat(e.target.value);
+                                    if (!isNaN(newPrice) && newPrice > 0 && isValidSlTpPrice(trade, "sl", newPrice)) {
+                                      onTradePriceUpdate?.(trade.id, "sl", level.id, newPrice, false);
+                                    }
+                                  }}
+                                  className="h-5 text-xs px-1 py-0 w-16"
+                                />
+                              </div>
+                              <div className="flex-1 min-w-0">
+                                <Slider
+                                  disabled={level.locked}
+                                  value={[
+                                    tradeSliders[trade.id]?.[level.id] ??
+                                    (() => {
+                                      const multiplier = trade.side === "buy"
+                                        ? (trade.entryPrice - level.price) / trade.entryPrice
+                                        : (level.price - trade.entryPrice) / trade.entryPrice;
+                                      const percent = Math.max(0.1, Math.min(100, multiplier * 100));
+                                      return percentToSlider(percent);
+                                    })()
+                                  ]}
+                                  onValueChange={(value) => {
+                                    if (level.locked) return;
+                                    setTradeSliders(prev => ({
+                                      ...prev,
+                                      [trade.id]: { ...prev[trade.id], [level.id]: value[0] }
+                                    }));
+                                  }}
+                                  onPointerUp={() => {
+                                    const sliderValue = tradeSliders[trade.id]?.[level.id] ?? 33.33;
+                                    const actualPercent = sliderToPercent(sliderValue);
+                                    const price = calculateSlTpPrice(trade.entryPrice, trade.side, "sl", actualPercent);
+                                    onTradePriceUpdate?.(trade.id, "sl", level.id, price, false);
+                                  }}
+                                  min={0}
+                                  max={100}
+                                  step={0.1}
+                                  className="w-full"
+                                />
+                              </div>
+                              <div className="flex items-center gap-0.5">
+                                <TooltipProvider>
+                                  <Tooltip>
+                                    <TooltipTrigger asChild>
+                                      <Button
+                                        size="sm"
+                                        variant="ghost"
+                                        className="h-4 w-4 p-0 hover:bg-muted"
+                                        onClick={() => onToggleLevelLock?.(trade.id, "sl", level.id, !level.locked)}
+                                      >
+                                        {level.locked ? <IconLock size={10} /> : <IconLockOpen size={10} />}
+                                      </Button>
+                                    </TooltipTrigger>
+                                    <TooltipContent>{level.locked ? "Unlock" : "Lock"}</TooltipContent>
+                                  </Tooltip>
+                                </TooltipProvider>
+                                <TooltipProvider>
+                                  <Tooltip>
+                                    <TooltipTrigger asChild>
+                                      <Button
+                                        size="sm"
+                                        variant="ghost"
+                                        className="h-4 w-4 p-0 text-destructive hover:bg-destructive/10"
+                                        onClick={() => {
+                                          onRemoveLevel?.(trade.id, "sl", level.id);
+                                          setTradeSliders(prev => {
+                                            const tradeLevelSliders = { ...prev[trade.id] };
+                                            delete tradeLevelSliders[level.id];
+                                            return { ...prev, [trade.id]: tradeLevelSliders };
+                                          });
+                                        }}
+                                      >
+                                        <IconTrash size={10} />
+                                      </Button>
+                                    </TooltipTrigger>
+                                    <TooltipContent>Remove</TooltipContent>
+                                  </Tooltip>
+                                </TooltipProvider>
+                              </div>
                             </div>
-                            <div className="flex-1 min-w-0">
-                              <Slider
-                                disabled={trade.lockedSl}
-                                value={[
-                                  tradeSliders[trade.id]?.sl ??
-                                  (() => {
-                                    const multiplier = trade.side === "buy"
-                                      ? (trade.entryPrice - trade.stopLoss) / trade.entryPrice
-                                      : (trade.stopLoss - trade.entryPrice) / trade.entryPrice;
-                                    const percent = Math.max(0.1, Math.min(100, multiplier * 100));
-                                    return percentToSlider(percent);
-                                  })()
-                                ]}
-                                onValueChange={(value) => {
-                                  if (trade.lockedSl) return;
-                                  const sliderValue = value[0];
-                                  setTradeSliders(prev => ({
-                                    ...prev,
-                                    [trade.id]: { ...prev[trade.id], sl: sliderValue }
-                                  }));
-                                }}
-                                onPointerUp={() => {
-                                  const sliderValue = tradeSliders[trade.id]?.sl ?? 33.33;
-                                  const actualPercent = sliderToPercent(sliderValue);
-                                  const price = calculateSlTpPrice(
-                                    trade.entryPrice,
-                                    trade.side,
-                                    "sl",
-                                    actualPercent,
-                                  );
-                                  onTradePriceUpdate?.(trade.id, "sl", price, false);
-                                }}
-                                min={0}
-                                max={100}
-                                step={0.1}
-                                className="w-full"
-                              />
+                            <div className="flex items-center gap-2">
+                              <div className="flex items-center gap-0.5 w-[4.5rem]">
+                                <Input
+                                  type="text"
+                                  disabled={level.locked}
+                                  value={level.lots.toFixed(2)}
+                                  onChange={(e) => {
+                                    const newLots = Math.min(trade.lots, Math.max(0.01, parseFloat(e.target.value) || 0));
+                                    onUpdateLevelLots?.(trade.id, "sl", level.id, newLots);
+                                  }}
+                                  className="h-5 text-xs px-1 py-0 w-10"
+                                />
+                                <span className="text-xs">Lots</span>
+                              </div>
+                              <div className="flex-1 min-w-0">
+                                <Slider
+                                  disabled={level.locked}
+                                  value={[level.lots]}
+                                  min={0.01}
+                                  max={getRemainingLots(trade.stopLossLevels, trade.lots) + level.lots}
+                                  step={0.01}
+                                  onValueChange={([value]) => {
+                                    if (level.locked) return;
+                                    onUpdateLevelLots?.(trade.id, "sl", level.id, value);
+                                  }}
+                                  onPointerUp={() => {
+                                    // Value is already updated via onValueChange
+                                  }}
+                                  className="w-full"
+                                />
+                              </div>
+                              <div className="w-[2.5rem]"></div>
                             </div>
-                            <div className="flex items-center gap-1">
-                              <TooltipProvider>
-                                <Tooltip>
-                                  <TooltipTrigger asChild>
-                                    <Button
-                                      size="sm"
-                                      variant="ghost"
-                                      className="h-4 w-4 p-0 hover:bg-muted"
-                                      onClick={() => {
-                                        onToggleLock?.(trade.id, "sl", !trade.lockedSl);
-                                      }}
-                                    >
-                                      {trade.lockedSl ? (
-                                        <IconLock size={10} />
-                                      ) : (
-                                        <IconLockOpen size={10} />
-                                      )}
-                                    </Button>
-                                  </TooltipTrigger>
-                                  <TooltipContent>
-                                    {trade.lockedSl ? "Unlock SL" : "Lock SL"}
-                                  </TooltipContent>
-                                </Tooltip>
-                              </TooltipProvider>
-                              <TooltipProvider>
-                                <Tooltip>
-                                  <TooltipTrigger asChild>
-                                    <Button
-                                      size="sm"
-                                      variant="ghost"
-                                      className="h-4 w-4 p-0 text-destructive hover:bg-destructive/10"
-                                      onClick={() => {
-                                        onRemoveSlTp?.(trade.id, "sl");
-                                        setTradeSliders(prev => {
-                                          const { [trade.id]: _, ...rest } = prev;
-                                          return rest;
-                                        });
-                                      }}
-                                    >
-                                      <IconTrash size={10} />
-                                    </Button>
-                                  </TooltipTrigger>
-                                  <TooltipContent>Remove SL</TooltipContent>
-                                </Tooltip>
-                              </TooltipProvider>
                             </div>
-                          </div>
+                          ))}
+                          {getRemainingLots(trade.stopLossLevels, trade.lots) > 0 && (
+                            <div className="flex items-center gap-2 pl-2">
+                              <span className="text-xs text-muted-foreground">
+                                Remaining: {getRemainingLots(trade.stopLossLevels, trade.lots).toFixed(2)} Lots
+                              </span>
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                className="h-5 text-xs px-2"
+                                onClick={() => {
+                                  const lastLevel = trade.stopLossLevels[trade.stopLossLevels.length - 1];
+                                  const basePrice = lastLevel ? lastLevel.price : trade.entryPrice;
+                                  const offset = trade.side === "buy" ? -0.001 : 0.001;
+                                  const newPrice = basePrice + offset;
+                                  onAddLevel?.(trade.id, "sl", newPrice, getRemainingLots(trade.stopLossLevels, trade.lots));
+                                }}
+                              >
+                                + Add SL Level
+                              </Button>
+                            </div>
+                          )}
                         </div>
                       )}
                     </div>
 
-                    {(!trade.stopLoss || !trade.takeProfit) && (
+                    {/* Add SL/TP buttons when none exist */}
+                    {(trade.stopLossLevels.length === 0 || trade.takeProfitLevels.length === 0) && (
                       <div className="mt-2 flex gap-1">
-                        {!trade.stopLoss && (
+                        {trade.stopLossLevels.length === 0 && (
                           <Button
                             size="sm"
                             variant="outline"
                             className="h-6 text-xs flex-1"
                             onClick={() => {
-                              const price = calculateSlTpPrice(
-                                trade.entryPrice,
-                                trade.side,
-                                "sl",
-                                1,
-                              );
-                              onTradePriceUpdate?.(trade.id, "sl", price);
+                              const price = calculateSlTpPrice(trade.entryPrice, trade.side, "sl", 1);
+                              onAddLevel?.(trade.id, "sl", price, 100);
                             }}
                           >
                             Add SL
                           </Button>
                         )}
 
-                        {!trade.takeProfit && (
+                        {trade.takeProfitLevels.length === 0 && (
                           <Button
                             size="sm"
                             variant="outline"
                             className="h-6 text-xs flex-1"
                             onClick={() => {
-                              const price = calculateSlTpPrice(
-                                trade.entryPrice,
-                                trade.side,
-                                "tp",
-                                1,
-                              );
-                              onTradePriceUpdate?.(trade.id, "tp", price);
+                              const price = calculateSlTpPrice(trade.entryPrice, trade.side, "tp", 1);
+                              onAddLevel?.(trade.id, "tp", price, 100);
                             }}
                           >
                             Add TP

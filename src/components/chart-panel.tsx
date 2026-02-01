@@ -61,13 +61,14 @@ export type ChartPanelProps = {
   /** Preview trade to display with solid lines */
   previewTrade?: PreviewTrade | null;
   /** Callback when SL preview line is dragged */
-  onSlPriceDrag?: (price: number) => void;
+  onSlPriceDrag?: (price: number, levelIndex: number) => void;
   /** Callback when TP preview line is dragged */
-  onTpPriceDrag?: (price: number) => void;
-  /** Callback when placed trade SL/TP is dragged */
+  onTpPriceDrag?: (price: number, levelIndex: number) => void;
+  /** Callback when placed trade SL/TP level is dragged */
   onTradePriceUpdate?: (
     tradeId: number,
     lineType: "sl" | "tp",
+    levelId: string,
     newPrice: number,
     isDragging?: boolean,
   ) => void;
@@ -78,14 +79,14 @@ export type ChartPanelProps = {
 };
 
 type DragTarget =
-  | { type: "sl" | "tp"; tradeId: number }
-  | { type: "sl" | "tp"; tradeId: "preview" }
+  | { type: "sl" | "tp"; tradeId: number; levelId: string }
+  | { type: "sl" | "tp"; tradeId: "preview"; levelIndex: number }
   | null;
 
 type TradeLines = {
   entry: IPriceLine;
-  sl: IPriceLine | null;
-  tp: IPriceLine | null;
+  slLevels: Map<string, IPriceLine>;  // levelId -> price line
+  tpLevels: Map<string, IPriceLine>;  // levelId -> price line
 };
 
 export function ChartPanel({
@@ -103,6 +104,7 @@ export function ChartPanel({
   const seriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
   const priceLinesRef = useRef<Map<number, TradeLines>>(new Map());
   const previewLinesRef = useRef<IPriceLine[]>([]);
+  const previewLineMetaRef = useRef<Array<{ type: "sl" | "tp"; levelIndex: number }>>([]);
   const onPriceChangeRef = useRef(onPriceChange);
   onPriceChangeRef.current = onPriceChange;
 
@@ -110,6 +112,12 @@ export function ChartPanel({
   useEffect(() => {
     tradesRef.current = trades;
   }, [trades]);
+
+  // Keep previewTrade ref up to date
+  const previewTradeRef = useRef(previewTrade);
+  useEffect(() => {
+    previewTradeRef.current = previewTrade;
+  }, [previewTrade]);
 
   // Drag state refs
   const isDraggingRef = useRef(false);
@@ -273,8 +281,10 @@ export function ChartPanel({
         dragOriginalStylesRef.current.clear();
 
         if (target.tradeId === "preview") {
-          const lineIndex = target.type === "sl" ? 0 : 1;
-          const line = previewLinesRef.current[lineIndex];
+          const metaIndex = previewLineMetaRef.current.findIndex(
+            (meta) => meta.type === target.type && meta.levelIndex === target.levelIndex,
+          );
+          const line = metaIndex >= 0 ? previewLinesRef.current[metaIndex] : undefined;
           if (line) {
             const opts = line.options();
             dragOriginalStylesRef.current.set(line, {
@@ -283,11 +293,11 @@ export function ChartPanel({
             });
             line.applyOptions({ lineWidth: 4, lineStyle: LineStyle.Solid });
           }
-        } else {
+        } else if ('levelId' in target) {
           const tradeLines = priceLinesRef.current.get(target.tradeId);
           if (tradeLines) {
-            const draggedLine =
-              target.type === "sl" ? tradeLines.sl : tradeLines.tp;
+            const levelMap = target.type === "sl" ? tradeLines.slLevels : tradeLines.tpLevels;
+            const draggedLine = levelMap.get(target.levelId);
             if (draggedLine) {
               const opts = draggedLine.options();
               dragOriginalStylesRef.current.set(draggedLine, {
@@ -299,19 +309,13 @@ export function ChartPanel({
                 lineStyle: LineStyle.Solid,
               });
             }
-            [
-              tradeLines.entry,
-              target.type === "sl" ? tradeLines.tp : tradeLines.sl,
-            ].forEach((line) => {
-              if (line) {
-                const opts = line.options();
-                dragOriginalStylesRef.current.set(line, {
-                  width: opts.lineWidth ?? 2,
-                  style: opts.lineStyle ?? LineStyle.Dotted,
-                });
-                line.applyOptions({ lineWidth: 3 });
-              }
+            // Also highlight entry and other levels
+            const opts = tradeLines.entry.options();
+            dragOriginalStylesRef.current.set(tradeLines.entry, {
+              width: opts.lineWidth ?? 2,
+              style: opts.lineStyle ?? LineStyle.Dotted,
             });
+            tradeLines.entry.applyOptions({ lineWidth: 3 });
           }
         }
 
@@ -354,42 +358,37 @@ export function ChartPanel({
 
         const previewLines = previewLinesRef.current;
         if (previewLines.length > 0) {
-          const slLine = previewLines[0];
-          const tpLine = previewLines[1];
-          const slPrice = slLine?.options().price ?? null;
-          const tpPrice = tpLine?.options().price ?? null;
-
-          if (slPrice !== null && isNearPriceLine(mouseY, slPrice)) {
-            isDraggingRef.current = true;
-            dragTargetRef.current = { type: "sl", tradeId: "preview" };
-            applyDragVisuals(dragTargetRef.current);
-            setCursor("ns-resize");
-            chart.applyOptions({ handleScroll: false, handleScale: false });
-            e.preventDefault();
-            e.stopPropagation();
-            return;
-          } else if (tpPrice !== null && isNearPriceLine(mouseY, tpPrice)) {
-            isDraggingRef.current = true;
-            dragTargetRef.current = { type: "tp", tradeId: "preview" };
-            applyDragVisuals(dragTargetRef.current);
-            setCursor("ns-resize");
-            chart.applyOptions({ handleScroll: false, handleScale: false });
-            e.preventDefault();
-            e.stopPropagation();
-            return;
+          for (let i = 0; i < previewLines.length; i++) {
+            const line = previewLines[i];
+            const price = line?.options().price ?? null;
+            if (price !== null && isNearPriceLine(mouseY, price)) {
+              const meta = previewLineMetaRef.current[i];
+              if (!meta) break;
+              isDraggingRef.current = true;
+              dragTargetRef.current = { type: meta.type, tradeId: "preview", levelIndex: meta.levelIndex };
+              applyDragVisuals(dragTargetRef.current);
+              setCursor("ns-resize");
+              chart.applyOptions({ handleScroll: false, handleScale: false });
+              e.preventDefault();
+              e.stopPropagation();
+              return;
+            }
           }
         }
 
         for (const [tradeId, lines] of priceLinesRef.current.entries()) {
-          if (lines.sl) {
-            const slPrice = lines.sl.options().price;
-            const trade = tradesRef.current.find((t) => t.id === tradeId);
-            // Skip if locked
-            if (trade?.lockedSl) continue;
+          const trade = tradesRef.current.find((t) => t.id === tradeId);
+          if (!trade) continue;
+          
+          // Check SL levels
+          for (const [levelId, slLine] of lines.slLevels.entries()) {
+            const level = trade.stopLossLevels.find((l) => l.id === levelId);
+            if (level?.locked) continue;
             
+            const slPrice = slLine.options().price;
             if (slPrice !== null && isNearPriceLine(mouseY, slPrice)) {
               isDraggingRef.current = true;
-              dragTargetRef.current = { type: "sl", tradeId };
+              dragTargetRef.current = { type: "sl", tradeId, levelId };
               applyDragVisuals(dragTargetRef.current);
               setCursor("ns-resize");
               chart.applyOptions({ handleScroll: false, handleScale: false });
@@ -399,15 +398,15 @@ export function ChartPanel({
             }
           }
 
-          if (lines.tp) {
-            const tpPrice = lines.tp.options().price;
-            const trade = tradesRef.current.find((t) => t.id === tradeId);
-            // Skip if locked
-            if (trade?.lockedTp) continue;
+          // Check TP levels
+          for (const [levelId, tpLine] of lines.tpLevels.entries()) {
+            const level = trade.takeProfitLevels.find((l) => l.id === levelId);
+            if (level?.locked) continue;
             
+            const tpPrice = tpLine.options().price;
             if (tpPrice !== null && isNearPriceLine(mouseY, tpPrice)) {
               isDraggingRef.current = true;
-              dragTargetRef.current = { type: "tp", tradeId };
+              dragTargetRef.current = { type: "tp", tradeId, levelId };
               applyDragVisuals(dragTargetRef.current);
               setCursor("ns-resize");
               chart.applyOptions({ handleScroll: false, handleScale: false });
@@ -433,16 +432,17 @@ export function ChartPanel({
 
             if (target.tradeId === "preview") {
               if (target.type === "sl") {
-                onSlPriceDragRef.current?.(newPrice as number);
+                onSlPriceDragRef.current?.(newPrice as number, target.levelIndex);
               } else {
-                onTpPriceDragRef.current?.(newPrice as number);
+                onTpPriceDragRef.current?.(newPrice as number, target.levelIndex);
               }
             } else {
               dragFinalPriceRef.current = newPrice as number;
 
               const lines = priceLinesRef.current.get(target.tradeId);
-              if (lines) {
-                const line = target.type === "sl" ? lines.sl : lines.tp;
+              if (lines && 'levelId' in target) {
+                const levelMap = target.type === "sl" ? lines.slLevels : lines.tpLevels;
+                const line = levelMap.get(target.levelId);
                 line?.applyOptions({ price: newPrice as number });
               }
             }
@@ -458,35 +458,40 @@ export function ChartPanel({
 
           const previewLines = previewLinesRef.current;
           if (previewLines.length > 0) {
-            const slLine = previewLines[0];
-            const tpLine = previewLines[1];
-            const slPrice = slLine?.options().price ?? null;
-            const tpPrice = tpLine?.options().price ?? null;
-
-            if (
-              isNearPriceLine(mouseY, slPrice) ||
-              isNearPriceLine(mouseY, tpPrice)
-            ) {
-              isNearAnyLine = true;
+            for (let i = 0; i < previewLines.length; i++) {
+              const line = previewLines[i];
+              const price = line?.options().price ?? null;
+              if (price !== null && isNearPriceLine(mouseY, price)) {
+                isNearAnyLine = true;
+                break;
+              }
             }
           }
 
           if (!isNearAnyLine) {
-            for (const [tradeId, lines] of priceLinesRef.current.entries()) {
+            outer: for (const [tradeId, lines] of priceLinesRef.current.entries()) {
               const trade = tradesRef.current.find((t) => t.id === tradeId);
+              if (!trade) continue;
               
-              if (lines.sl && !trade?.lockedSl) {
-                const slPrice = lines.sl.options().price;
+              // Check SL levels
+              for (const [levelId, slLine] of lines.slLevels.entries()) {
+                const level = trade.stopLossLevels.find((l) => l.id === levelId);
+                if (level?.locked) continue;
+                const slPrice = slLine.options().price;
                 if (slPrice !== null && isNearPriceLine(mouseY, slPrice)) {
                   isNearAnyLine = true;
-                  break;
+                  break outer;
                 }
               }
-              if (lines.tp && !trade?.lockedTp) {
-                const tpPrice = lines.tp.options().price;
+              
+              // Check TP levels
+              for (const [levelId, tpLine] of lines.tpLevels.entries()) {
+                const level = trade.takeProfitLevels.find((l) => l.id === levelId);
+                if (level?.locked) continue;
+                const tpPrice = tpLine.options().price;
                 if (tpPrice !== null && isNearPriceLine(mouseY, tpPrice)) {
                   isNearAnyLine = true;
-                  break;
+                  break outer;
                 }
               }
             }
@@ -500,11 +505,12 @@ export function ChartPanel({
         if (isDraggingRef.current) {
           const target = dragTargetRef.current;
           const finalPrice = dragFinalPriceRef.current;
-          if (target && target.tradeId !== "preview" && finalPrice !== null) {
+          if (target && target.tradeId !== "preview" && finalPrice !== null && 'levelId' in target) {
             // Pass isDragging: false to trigger toast notification
             onTradePriceUpdateRef.current?.(
               target.tradeId,
               target.type,
+              target.levelId,
               finalPrice,
               false,
             );
@@ -565,8 +571,8 @@ export function ChartPanel({
 
         priceLinesRef.current.forEach((lines) => {
           if (lines.entry) seriesRef.current?.removePriceLine(lines.entry);
-          if (lines.sl) seriesRef.current?.removePriceLine(lines.sl);
-          if (lines.tp) seriesRef.current?.removePriceLine(lines.tp);
+          lines.slLevels.forEach((line) => seriesRef.current?.removePriceLine(line));
+          lines.tpLevels.forEach((line) => seriesRef.current?.removePriceLine(line));
         });
         priceLinesRef.current.clear();
 
@@ -574,6 +580,7 @@ export function ChartPanel({
           seriesRef.current?.removePriceLine(line);
         });
         previewLinesRef.current = [];
+        previewLineMetaRef.current = [];
 
         chart.remove();
         chartRef.current = null;
@@ -624,8 +631,8 @@ export function ChartPanel({
     currentLines.forEach((lines, tradeId) => {
       if (!tradeIds.has(tradeId)) {
         if (lines.entry) series.removePriceLine(lines.entry);
-        if (lines.sl) series.removePriceLine(lines.sl);
-        if (lines.tp) series.removePriceLine(lines.tp);
+        lines.slLevels.forEach((line) => series.removePriceLine(line));
+        lines.tpLevels.forEach((line) => series.removePriceLine(line));
         currentLines.delete(tradeId);
       }
     });
@@ -637,78 +644,109 @@ export function ChartPanel({
       const existingLines = currentLines.get(trade.id);
 
       if (existingLines) {
-        // Update existing price lines visibility and prices
+        // Update entry line
         existingLines.entry.applyOptions({
           lineVisible: trade.visible,
           axisLabelVisible: trade.visible,
           title: `#${displayIndex} Entry`,
         });
 
-        // Skip updating price if currently dragging this line
-        const isDraggingThisLine =
+        // Skip updating price if currently dragging this trade
+        const isDraggingThisTrade =
           isDraggingRef.current && dragTargetRef.current?.tradeId === trade.id;
+        const dragTarget = dragTargetRef.current;
 
-        if (existingLines.sl) {
-          const options: any = {
-            lineVisible: trade.visible,
-            axisLabelVisible: trade.visible,
-            lineWidth: trade.lockedSl ? 3 : 2,
-            lineStyle: trade.lockedSl ? LineStyle.Dashed : LineStyle.Dotted,
-            title: `#${displayIndex} SL`,
-          };
-          // Only update price if not currently dragging this SL line
-          if (!(isDraggingThisLine && dragTargetRef.current?.type === "sl")) {
-            options.price = trade.stopLoss!;
+        // Sync SL levels
+        const currentSlIds = new Set(trade.stopLossLevels.map((l) => l.id));
+        
+        // Remove SL lines that no longer exist
+        existingLines.slLevels.forEach((line, levelId) => {
+          if (!currentSlIds.has(levelId)) {
+            series.removePriceLine(line);
+            existingLines.slLevels.delete(levelId);
           }
-          existingLines.sl.applyOptions(options);
-        }
-        if (existingLines.tp) {
-          const options: any = {
-            lineVisible: trade.visible,
-            axisLabelVisible: trade.visible,
-            lineWidth: trade.lockedTp ? 3 : 2,
-            lineStyle: trade.lockedTp ? LineStyle.Dashed : LineStyle.Dotted,
-            title: `#${displayIndex} TP`,
-          };
-          // Only update price if not currently dragging this TP line
-          if (!(isDraggingThisLine && dragTargetRef.current?.type === "tp")) {
-            options.price = trade.takeProfit!;
+        });
+        
+        // Add or update SL lines
+        trade.stopLossLevels.forEach((level, levelIndex) => {
+          const existingLine = existingLines.slLevels.get(level.id);
+          const isDraggingThisLevel = isDraggingThisTrade && 
+            dragTarget?.type === "sl" && 
+            'levelId' in dragTarget && 
+            dragTarget.levelId === level.id;
+          
+          if (existingLine) {
+            const options: any = {
+              lineVisible: trade.visible,
+              axisLabelVisible: trade.visible,
+              lineWidth: level.locked ? 3 : 2,
+              lineStyle: level.locked ? LineStyle.Dashed : LineStyle.Dotted,
+              title: `#${displayIndex} SL${trade.stopLossLevels.length > 1 ? levelIndex + 1 : ""}`,
+            };
+            if (!isDraggingThisLevel) {
+              options.price = level.price;
+            }
+            existingLine.applyOptions(options);
+          } else {
+            const newLine = series.createPriceLine({
+              price: level.price,
+              color: trade.color,
+              lineWidth: level.locked ? 3 : 2,
+              lineStyle: level.locked ? LineStyle.Dashed : LineStyle.Dotted,
+              lineVisible: trade.visible,
+              axisLabelVisible: true,
+              title: `#${displayIndex} SL${trade.stopLossLevels.length > 1 ? levelIndex + 1 : ""}`,
+            });
+            existingLines.slLevels.set(level.id, newLine);
           }
-          existingLines.tp.applyOptions(options);
-        }
+        });
 
-        // Handle SL/TP addition or removal
-        if (trade.stopLoss !== null && !existingLines.sl) {
-          existingLines.sl = series.createPriceLine({
-            price: trade.stopLoss,
-            color: trade.color,
-            lineWidth: trade.lockedSl ? 3 : 2,
-            lineStyle: trade.lockedSl ? LineStyle.Dashed : LineStyle.Dotted,
-            lineVisible: trade.visible,
-            axisLabelVisible: true,
-            title: `#${displayIndex} SL`,
-          });
-        } else if (trade.stopLoss === null && existingLines.sl) {
-          series.removePriceLine(existingLines.sl);
-          existingLines.sl = null;
-        }
-
-        if (trade.takeProfit !== null && !existingLines.tp) {
-          existingLines.tp = series.createPriceLine({
-            price: trade.takeProfit,
-            color: trade.color,
-            lineWidth: trade.lockedTp ? 3 : 2,
-            lineStyle: trade.lockedTp ? LineStyle.Dashed : LineStyle.Dotted,
-            lineVisible: trade.visible,
-            axisLabelVisible: true,
-            title: `#${displayIndex} TP`,
-          });
-        } else if (trade.takeProfit === null && existingLines.tp) {
-          series.removePriceLine(existingLines.tp);
-          existingLines.tp = null;
-        }
+        // Sync TP levels
+        const currentTpIds = new Set(trade.takeProfitLevels.map((l) => l.id));
+        
+        // Remove TP lines that no longer exist
+        existingLines.tpLevels.forEach((line, levelId) => {
+          if (!currentTpIds.has(levelId)) {
+            series.removePriceLine(line);
+            existingLines.tpLevels.delete(levelId);
+          }
+        });
+        
+        // Add or update TP lines
+        trade.takeProfitLevels.forEach((level, levelIndex) => {
+          const existingLine = existingLines.tpLevels.get(level.id);
+          const isDraggingThisLevel = isDraggingThisTrade && 
+            dragTarget?.type === "tp" && 
+            'levelId' in dragTarget && 
+            dragTarget.levelId === level.id;
+          
+          if (existingLine) {
+            const options: any = {
+              lineVisible: trade.visible,
+              axisLabelVisible: trade.visible,
+              lineWidth: level.locked ? 3 : 2,
+              lineStyle: level.locked ? LineStyle.Dashed : LineStyle.Dotted,
+              title: `#${displayIndex} TP${trade.takeProfitLevels.length > 1 ? levelIndex + 1 : ""}`,
+            };
+            if (!isDraggingThisLevel) {
+              options.price = level.price;
+            }
+            existingLine.applyOptions(options);
+          } else {
+            const newLine = series.createPriceLine({
+              price: level.price,
+              color: trade.color,
+              lineWidth: level.locked ? 3 : 2,
+              lineStyle: level.locked ? LineStyle.Dashed : LineStyle.Dotted,
+              lineVisible: trade.visible,
+              axisLabelVisible: true,
+              title: `#${displayIndex} TP${trade.takeProfitLevels.length > 1 ? levelIndex + 1 : ""}`,
+            });
+            existingLines.tpLevels.set(level.id, newLine);
+          }
+        });
       } else {
-        // Create new price lines
+        // Create new price lines for this trade
         const entryLine = series.createPriceLine({
           price: trade.entryPrice,
           color: trade.color,
@@ -719,36 +757,38 @@ export function ChartPanel({
           title: `#${displayIndex} Entry`,
         });
 
-        const slLine =
-          trade.stopLoss !== null
-            ? series.createPriceLine({
-                price: trade.stopLoss,
-                color: trade.color,
-                lineWidth: trade.lockedSl ? 3 : 2,
-                lineStyle: trade.lockedSl ? LineStyle.Dashed : LineStyle.Dotted,
-                lineVisible: trade.visible,
-                axisLabelVisible: true,
-                title: `#${displayIndex} SL`,
-              })
-            : null;
+        const slLevels = new Map<string, IPriceLine>();
+        trade.stopLossLevels.forEach((level, levelIndex) => {
+          const line = series.createPriceLine({
+            price: level.price,
+            color: trade.color,
+            lineWidth: level.locked ? 3 : 2,
+            lineStyle: level.locked ? LineStyle.Dashed : LineStyle.Dotted,
+            lineVisible: trade.visible,
+            axisLabelVisible: true,
+            title: `#${displayIndex} SL${trade.stopLossLevels.length > 1 ? levelIndex + 1 : ""}`,
+          });
+          slLevels.set(level.id, line);
+        });
 
-        const tpLine =
-          trade.takeProfit !== null
-            ? series.createPriceLine({
-                price: trade.takeProfit,
-                color: trade.color,
-                lineWidth: trade.lockedTp ? 3 : 2,
-                lineStyle: trade.lockedTp ? LineStyle.Dashed : LineStyle.Dotted,
-                lineVisible: trade.visible,
-                axisLabelVisible: true,
-                title: `#${displayIndex} TP`,
-              })
-            : null;
+        const tpLevels = new Map<string, IPriceLine>();
+        trade.takeProfitLevels.forEach((level, levelIndex) => {
+          const line = series.createPriceLine({
+            price: level.price,
+            color: trade.color,
+            lineWidth: level.locked ? 3 : 2,
+            lineStyle: level.locked ? LineStyle.Dashed : LineStyle.Dotted,
+            lineVisible: trade.visible,
+            axisLabelVisible: true,
+            title: `#${displayIndex} TP${trade.takeProfitLevels.length > 1 ? levelIndex + 1 : ""}`,
+          });
+          tpLevels.set(level.id, line);
+        });
 
         currentLines.set(trade.id, {
           entry: entryLine,
-          sl: slLine,
-          tp: tpLine,
+          slLevels,
+          tpLevels,
         });
       }
     });
@@ -766,40 +806,45 @@ export function ChartPanel({
       series.removePriceLine(line);
     });
     previewLinesRef.current = [];
+    previewLineMetaRef.current = [];
 
     // Add new preview lines if preview trade exists
     if (previewTrade) {
       const newLines: IPriceLine[] = [];
+      const newMeta: Array<{ type: "sl" | "tp"; levelIndex: number }> = [];
 
-      // Stop loss line (solid) - Red
-      if (previewTrade.stopLoss !== null) {
+      // Stop loss lines - Red with level numbers
+      previewTrade.stopLossLevels.forEach((level, index) => {
         const slLine = series.createPriceLine({
-          price: previewTrade.stopLoss,
-          color: previewTrade.color ?? "#ef4444", // Use trade color in edit mode, otherwise red
+          price: level.price,
+          color: "#ef4444",
           lineWidth: 2,
           lineStyle: LineStyle.Solid,
           lineVisible: true,
           axisLabelVisible: true,
-          title: "SL (Preview)",
+          title: previewTrade.stopLossLevels.length > 1 ? `SL${index + 1} (Preview)` : "SL (Preview)",
         });
         newLines.push(slLine);
-      }
+        newMeta.push({ type: "sl", levelIndex: index });
+      });
 
-      // Take profit line (solid) - Green
-      if (previewTrade.takeProfit !== null) {
+      // Take profit lines - Green with level numbers
+      previewTrade.takeProfitLevels.forEach((level, index) => {
         const tpLine = series.createPriceLine({
-          price: previewTrade.takeProfit,
-          color: previewTrade.color ?? "#10b981", // Use trade color in edit mode, otherwise green
+          price: level.price,
+          color: "#10b981",
           lineWidth: 2,
           lineStyle: LineStyle.Solid,
           lineVisible: true,
           axisLabelVisible: true,
-          title: "TP (Preview)",
+          title: previewTrade.takeProfitLevels.length > 1 ? `TP${index + 1} (Preview)` : "TP (Preview)",
         });
         newLines.push(tpLine);
-      }
+        newMeta.push({ type: "tp", levelIndex: index });
+      });
 
       previewLinesRef.current = newLines;
+      previewLineMetaRef.current = newMeta;
     }
   }, [previewTrade]);
 

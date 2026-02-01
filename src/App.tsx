@@ -3,6 +3,7 @@ import {
   PlaceTradesCard,
   type PreviewTrade,
   type TradeLog,
+  type SlTpLevel,
 } from "@/components/place-trades-card";
 import {
   ResizableHandle,
@@ -51,8 +52,8 @@ export function App() {
   }, [dataSource]);
 
   // Refs to store the drag handlers from PlaceTradesCard
-  const slDragHandlerRef = useRef<((price: number) => void) | null>(null);
-  const tpDragHandlerRef = useRef<((price: number) => void) | null>(null);
+  const slDragHandlerRef = useRef<((price: number, levelIndex: number) => void) | null>(null);
+  const tpDragHandlerRef = useRef<((price: number, levelIndex: number) => void) | null>(null);
   
   // Ref to track recent toast notifications to prevent duplicates
   const recentToastsRef = useRef<Record<string, number>>({});
@@ -101,83 +102,122 @@ export function App() {
   const handleTradePriceUpdate = (
     tradeId: number,
     lineType: "sl" | "tp",
+    levelId: string,
     newPrice: number,
     isDragging: boolean = false,
   ) => {
     setTrades((prev) =>
       prev.map((trade) => {
-        if (trade.id === tradeId && isValidSlTpPrice(trade, lineType, newPrice)) {
-          // Show toast notification only when dragging ends, with deduplication
-          if (!isDragging) {
-            const toastKey = `${tradeId}-${lineType}`;
-            const lastToastTime = recentToastsRef.current[toastKey] || 0;
-            const now = Date.now();
-            
-            // Only show toast if more than 300ms has passed since the last one
-            if (now - lastToastTime > 300) {
-              recentToastsRef.current[toastKey] = now;
-              if (ENABLE_TOASTS) {
-                const displayIndex = getDisplayIndex(tradeId);
-                const lineLabel = lineType === "sl" ? "SL" : "TP";
-                toast.info(`Position #${displayIndex} ${lineLabel} updated`, {
-                  description: `${lineLabel} set to ${newPrice.toFixed(5)}`,
-                });
-              }
-            }
-          }
-          return {
-            ...trade,
-            [lineType === "sl" ? "stopLoss" : "takeProfit"]: newPrice,
-          };
+        if (trade.id !== tradeId || !isValidSlTpPrice(trade, lineType, newPrice)) {
+          return trade;
         }
-        return trade;
+        
+        const levelsKey = lineType === "sl" ? "stopLossLevels" : "takeProfitLevels";
+        const updatedLevels = trade[levelsKey].map((level) =>
+          level.id === levelId ? { ...level, price: newPrice } : level
+        );
+        
+        // Show toast notification only when dragging ends
+        if (!isDragging && ENABLE_TOASTS) {
+          const toastKey = `${tradeId}-${levelId}`;
+          const lastToastTime = recentToastsRef.current[toastKey] || 0;
+          const now = Date.now();
+          
+          if (now - lastToastTime > 300) {
+            recentToastsRef.current[toastKey] = now;
+            const displayIndex = getDisplayIndex(tradeId);
+            const lineLabel = lineType === "sl" ? "SL" : "TP";
+            toast.info(`Position #${displayIndex} ${lineLabel} updated`, {
+              description: `${lineLabel} set to ${newPrice.toFixed(5)}`,
+            });
+          }
+        }
+        
+        return { ...trade, [levelsKey]: updatedLevels };
       }),
     );
   };
 
-  const handleRemoveSlTp = (tradeId: number, type: "sl" | "tp") => {
+  const handleRemoveLevel = (tradeId: number, type: "sl" | "tp", levelId: string) => {
     const trade = trades.find((t) => t.id === tradeId);
     if (trade && ENABLE_TOASTS) {
       const displayIndex = getDisplayIndex(tradeId);
       const typeLabel = type === "sl" ? "SL" : "TP";
-      toast.info(`Position #${displayIndex} ${typeLabel} removed`, {
-        description: `${typeLabel} has been cleared`,
-      });
+      toast.info(`Position #${displayIndex} ${typeLabel} level removed`);
     }
     setTrades((prev) =>
-      prev.map((trade) =>
-        trade.id === tradeId
-          ? {
-              ...trade,
-              [type === "sl" ? "stopLoss" : "takeProfit"]: null,
-            }
-          : trade,
-      ),
+      prev.map((trade) => {
+        if (trade.id !== tradeId) return trade;
+        const levelsKey = type === "sl" ? "stopLossLevels" : "takeProfitLevels";
+        return {
+          ...trade,
+          [levelsKey]: trade[levelsKey].filter((level) => level.id !== levelId),
+        };
+      }),
     );
   };
 
-  const handleToggleLock = (
+  const handleToggleLevelLock = (
     tradeId: number,
     type: "sl" | "tp",
+    levelId: string,
     locked: boolean,
   ) => {
-    const trade = trades.find((t) => t.id === tradeId);
-    if (trade && ENABLE_TOASTS) {
-      const displayIndex = getDisplayIndex(tradeId);
-      const lineLabel = type === "sl" ? "SL" : "TP";
-      toast.info(`Position #${displayIndex} ${lineLabel} ${locked ? "locked" : "unlocked"}`, {
-        description: `${lineLabel} is now ${locked ? "locked" : "unlocked"}`,
-      });
-    }
     setTrades((prev) =>
-      prev.map((trade) =>
-        trade.id === tradeId
-          ? {
-              ...trade,
-              [type === "sl" ? "lockedSl" : "lockedTp"]: locked,
-            }
-          : trade,
-      ),
+      prev.map((trade) => {
+        if (trade.id !== tradeId) return trade;
+        const levelsKey = type === "sl" ? "stopLossLevels" : "takeProfitLevels";
+        return {
+          ...trade,
+          [levelsKey]: trade[levelsKey].map((level) =>
+            level.id === levelId ? { ...level, locked } : level
+          ),
+        };
+      }),
+    );
+  };
+
+  const handleUpdateLevelLots = (
+    tradeId: number,
+    type: "sl" | "tp",
+    levelId: string,
+    newLots: number,
+  ) => {
+    setTrades((prev) =>
+      prev.map((trade) => {
+        if (trade.id !== tradeId) return trade;
+        const levelsKey = type === "sl" ? "stopLossLevels" : "takeProfitLevels";
+        return {
+          ...trade,
+          [levelsKey]: trade[levelsKey].map((level) =>
+            level.id === levelId ? { ...level, lots: newLots } : level
+          ),
+        };
+      }),
+    );
+  };
+
+  const handleAddLevel = (
+    tradeId: number,
+    type: "sl" | "tp",
+    price: number,
+    lots: number,
+  ) => {
+    setTrades((prev) =>
+      prev.map((trade) => {
+        if (trade.id !== tradeId) return trade;
+        const levelsKey = type === "sl" ? "stopLossLevels" : "takeProfitLevels";
+        const newLevel: SlTpLevel = {
+          id: `${type}-${Date.now()}-${trade[levelsKey].length + 1}`,
+          price,
+          lots,
+          locked: false,
+        };
+        return {
+          ...trade,
+          [levelsKey]: [...trade[levelsKey], newLevel],
+        };
+      }),
     );
   };
 
@@ -190,16 +230,15 @@ export function App() {
       });
     }
     setTrades((prev) =>
-      prev.map((trade) =>
-        trade.id === tradeId
-          ? {
-              ...trade,
-              lockedPosition: locked,
-              lockedSl: locked,
-              lockedTp: locked,
-            }
-          : trade,
-      ),
+      prev.map((trade) => {
+        if (trade.id !== tradeId) return trade;
+        return {
+          ...trade,
+          lockedPosition: locked,
+          stopLossLevels: trade.stopLossLevels.map((level) => ({ ...level, locked })),
+          takeProfitLevels: trade.takeProfitLevels.map((level) => ({ ...level, locked })),
+        };
+      }),
     );
   };
 
@@ -234,8 +273,8 @@ export function App() {
             onPriceChange={setLivePrice}
             trades={trades}
             previewTrade={previewTrade}
-            onSlPriceDrag={(price) => slDragHandlerRef.current?.(price)}
-            onTpPriceDrag={(price) => tpDragHandlerRef.current?.(price)}
+            onSlPriceDrag={(price, levelIndex) => slDragHandlerRef.current?.(price, levelIndex)}
+            onTpPriceDrag={(price, levelIndex) => tpDragHandlerRef.current?.(price, levelIndex)}
             onTradePriceUpdate={handleTradePriceUpdate}
             dataSource={dataSource}
             isDark={isDark}
@@ -255,9 +294,11 @@ export function App() {
                 tpDragHandlerRef.current = handler;
               }}
               trades={trades}
-              onRemoveSlTp={handleRemoveSlTp}
+              onRemoveLevel={handleRemoveLevel}
               onTradePriceUpdate={handleTradePriceUpdate}
-              onToggleLock={handleToggleLock}
+              onToggleLevelLock={handleToggleLevelLock}
+              onUpdateLevelLots={handleUpdateLevelLots}
+              onAddLevel={handleAddLevel}
               onTogglePositionLock={handleTogglePositionLock}
               onCloseTrade={handleCloseTrade}
               dataSource={dataSource}
