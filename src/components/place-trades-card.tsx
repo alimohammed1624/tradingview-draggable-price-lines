@@ -58,10 +58,16 @@ export type SlTpLevel = {
   locked?: boolean;     // Whether this level is locked from dragging
 };
 
-// Helper to calculate remaining unallocated lots for a type
+// Helper to calculate remaining unallocated lots for display
 export function getRemainingLots(levels: SlTpLevel[], totalLots: number): number {
   const total = levels.reduce((sum, l) => sum + l.lots, 0);
   return Math.max(0, totalLots - total);
+}
+
+// Helper to calculate max lots a slider can have
+// Returns the total lots available (actual enforcement happens in onValueChange)
+export function getMaxLotsForLevel(levels: SlTpLevel[], totalLots: number, currentLevelId: string): number {
+  return totalLots;
 }
 
 export type TradeLog = {
@@ -152,9 +158,32 @@ export function PlaceTradesCard({
 
   // Track slider values for creation levels: { levelId: sliderValue }
   const [creationSliders, setCreationSliders] = React.useState<Record<string, number>>({});
+  
+  // Track lot slider values for creation levels: { levelId: lotValue }
+  const [creationLotSliders, setCreationLotSliders] = React.useState<Record<string, number>>({});
 
   // Track slider values for each trade's SL/TP levels: { tradeId: { levelId: sliderValue } }
   const [tradeSliders, setTradeSliders] = React.useState<Record<number, Record<string, number>>>({});
+  
+  // Track lot slider values for placed trades: { tradeId: { levelId: lotValue } }
+  const [tradeLotSliders, setTradeLotSliders] = React.useState<Record<number, Record<string, number>>>({});
+
+  // Freeze effectivePrice during drag for stable tooltips
+  const [dragBasePrice, setDragBasePrice] = React.useState<number | null>(null);
+  const [dragBaseSide, setDragBaseSide] = React.useState<'buy' | 'sell' | null>(null);
+  const [isPriceDragging, setIsPriceDragging] = React.useState(false);
+
+  // Temporary price inputs for editing (levelId -> input value)
+  const [creationTpPriceInputs, setCreationTpPriceInputs] = React.useState<Record<string, string>>({});
+  const [creationSlPriceInputs, setCreationSlPriceInputs] = React.useState<Record<string, string>>({});
+  const [tradeTpPriceInputs, setTradeTpPriceInputs] = React.useState<Record<number, Record<string, string>>>({});
+  const [tradeSlPriceInputs, setTradeSlPriceInputs] = React.useState<Record<number, Record<string, string>>>({});
+
+  // Temporary lots inputs for editing (levelId -> input value)
+  const [creationTpLotsInputs, setCreationTpLotsInputs] = React.useState<Record<string, string>>({});
+  const [creationSlLotsInputs, setCreationSlLotsInputs] = React.useState<Record<string, string>>({});
+  const [tradeTpLotsInputs, setTradeTpLotsInputs] = React.useState<Record<number, Record<string, string>>>({});
+  const [tradeSlLotsInputs, setTradeSlLotsInputs] = React.useState<Record<number, Record<string, string>>>({});
 
   const effectivePrice = livePrice ?? currentPrice;
 
@@ -224,6 +253,40 @@ export function PlaceTradesCard({
     [],
   );
 
+  // Format functions for tooltips
+  // For price sliders, format the delta value by adding it to the current market price
+  // Use frozen price during drag for stable tooltips
+  const formatCreationTpPrice = React.useCallback((sliderVal: number) => {
+    const basePrice = dragBasePrice ?? effectivePrice;
+    const baseSide = dragBaseSide ?? side;
+    const actualPercent = sliderToPercent(sliderVal);
+    const delta = basePrice * (actualPercent / 100);
+    const price = baseSide === "buy" ? basePrice + delta : basePrice - delta;
+    return price.toFixed(5);
+  }, [sliderToPercent, effectivePrice, side, dragBasePrice, dragBaseSide]);
+
+  const formatCreationSlPrice = React.useCallback((sliderVal: number) => {
+    const basePrice = dragBasePrice ?? effectivePrice;
+    const baseSide = dragBaseSide ?? side;
+    const actualPercent = sliderToPercent(sliderVal);
+    const delta = basePrice * (actualPercent / 100);
+    const price = baseSide === "buy" ? basePrice - delta : basePrice + delta;
+    return price.toFixed(5);
+  }, [sliderToPercent, effectivePrice, side, dragBasePrice, dragBaseSide]);
+
+  const formatLotValue = React.useCallback((val: number) => {
+    return `${val.toFixed(2)} lots`;
+  }, []);
+
+  // Factory function to create format functions for trade price sliders
+  const createTradePriceFormatter = React.useCallback((entryPrice: number, tradeSide: Side, type: "sl" | "tp") => {
+    return (val: number) => {
+      const actualPercent = sliderToPercent(val);
+      const price = calculateSlTpPrice(entryPrice, tradeSide, type, actualPercent);
+      return price.toFixed(5);
+    };
+  }, [sliderToPercent, calculateSlTpPrice]);
+
   const isValidSlTpPrice = React.useCallback(
     (trade: TradeLog, lineType: "sl" | "tp", newPrice: number): boolean => {
       if (trade.side === "buy") {
@@ -290,6 +353,9 @@ export function PlaceTradesCard({
   // Sync creationSliders with creation level prices
   React.useEffect(() => {
     setCreationSliders(prev => {
+      if (isPriceDragging) {
+        return prev;
+      }
       const updated = { ...prev };
       let hasChanges = false;
 
@@ -319,7 +385,7 @@ export function PlaceTradesCard({
 
       return hasChanges ? updated : prev;
     });
-  }, [creationSlLevels, creationTpLevels, effectivePrice, side, percentToSlider]);
+  }, [creationSlLevels, creationTpLevels, effectivePrice, side, percentToSlider, isPriceDragging]);
 
   const lotsDisplay = Number(lots.toFixed(2));
   const lotsLabel = lotsDisplay === 1 ? "lot" : "lots";
@@ -524,14 +590,34 @@ export function PlaceTradesCard({
                     <span className="text-xs font-semibold whitespace-nowrap">#{idx + 1}</span>
                     <Input
                       type="text"
-                      value={level.price.toFixed(5)}
+                      value={creationTpPriceInputs[level.id] !== undefined ? creationTpPriceInputs[level.id] : level.price.toFixed(5)}
                       onChange={(e) => {
-                        const newPrice = parseFloat(e.target.value);
+                        setCreationTpPriceInputs(prev => ({
+                          ...prev,
+                          [level.id]: e.target.value
+                        }));
+                      }}
+                      onBlur={(e) => {
+                        const inputValue = e.target.value;
+                        if (inputValue === "") {
+                          setCreationTpPriceInputs(prev => {
+                            const updated = { ...prev };
+                            delete updated[level.id];
+                            return updated;
+                          });
+                          return;
+                        }
+                        const newPrice = parseFloat(inputValue);
                         if (!isNaN(newPrice) && newPrice > 0) {
                           const newLevels = [...creationTpLevels];
                           newLevels[idx] = { ...level, price: newPrice };
                           setCreationTpLevels(newLevels);
                         }
+                        setCreationTpPriceInputs(prev => {
+                          const updated = { ...prev };
+                          delete updated[level.id];
+                          return updated;
+                        });
                       }}
                       className="h-5 text-xs px-1 py-0 w-16"
                     />
@@ -545,6 +631,21 @@ export function PlaceTradesCard({
                           [level.id]: value[0]
                         }));
                       }}
+                      onPointerDown={() => {
+                        setDragBasePrice(effectivePrice);
+                        setDragBaseSide(side);
+                        setIsPriceDragging(true);
+                      }}
+                      onPointerCancel={() => {
+                        setDragBasePrice(null);
+                        setDragBaseSide(null);
+                        setIsPriceDragging(false);
+                      }}
+                      onLostPointerCapture={() => {
+                        setDragBasePrice(null);
+                        setDragBaseSide(null);
+                        setIsPriceDragging(false);
+                      }}
                       onPointerUp={() => {
                         const sliderValue = creationSliders[level.id] ?? 33.33;
                         const actualPercent = sliderToPercent(sliderValue);
@@ -552,11 +653,16 @@ export function PlaceTradesCard({
                         const newLevels = [...creationTpLevels];
                         newLevels[idx] = { ...level, price: newPrice };
                         setCreationTpLevels(newLevels);
+                        setDragBasePrice(null);
+                        setDragBaseSide(null);
+                        setIsPriceDragging(false);
                       }}
                       min={0}
                       max={100}
                       step={0.1}
                       className="w-full"
+                      showValueTooltip
+                      formatValue={formatCreationTpPrice}
                     />
                   </div>
                   <div className="w-[2.5rem] text-right">
@@ -586,12 +692,39 @@ export function PlaceTradesCard({
                   <div className="flex items-center gap-0.5 w-[4.5rem]">
                     <Input
                       type="text"
-                      value={level.lots.toFixed(2)}
+                      value={creationTpLotsInputs[level.id] !== undefined ? creationTpLotsInputs[level.id] : level.lots.toFixed(2)}
                       onChange={(e) => {
-                        const newLots = Math.min(lots, Math.max(0.01, parseFloat(e.target.value) || 0));
+                        setCreationTpLotsInputs(prev => ({
+                          ...prev,
+                          [level.id]: e.target.value
+                        }));
+                      }}
+                      onBlur={(e) => {
+                        const inputValue = e.target.value;
+                        if (inputValue === "") {
+                          setCreationTpLotsInputs(prev => {
+                            const updated = { ...prev };
+                            delete updated[level.id];
+                            return updated;
+                          });
+                          return;
+                        }
+                        const sumOfOthers = creationTpLevels
+                          .filter(l => l.id !== level.id)
+                          .reduce((sum, l) => sum + l.lots, 0);
+                        const maxAllowed = lots - sumOfOthers;
+                        const newLots = Math.min(lots, Math.max(0.01, parseFloat(inputValue) || 0.01));
+                        const cappedLots = Math.min(newLots, maxAllowed);
+                        
                         const newLevels = [...creationTpLevels];
-                        newLevels[idx] = { ...level, lots: newLots };
+                        newLevels[idx] = { ...level, lots: cappedLots };
                         setCreationTpLevels(newLevels);
+                        
+                        setCreationTpLotsInputs(prev => {
+                          const updated = { ...prev };
+                          delete updated[level.id];
+                          return updated;
+                        });
                       }}
                       className="h-5 text-xs px-1 py-0 w-10"
                     />
@@ -599,19 +732,34 @@ export function PlaceTradesCard({
                   </div>
                   <div className="flex-1 min-w-0">
                     <Slider
-                      value={[level.lots]}
+                      value={[creationLotSliders[level.id] ?? level.lots]}
                       min={0.01}
-                      max={getRemainingLots(creationTpLevels, lots) + level.lots}
+                      max={getMaxLotsForLevel(creationTpLevels, lots, level.id)}
                       step={0.01}
                       onValueChange={([value]) => {
-                        const newLevels = [...creationTpLevels];
-                        newLevels[idx] = { ...level, lots: value };
-                        setCreationTpLevels(newLevels);
+                        // Validate that sum doesn't exceed total lots
+                        const sumOfOthers = creationTpLevels
+                          .filter(l => l.id !== level.id)
+                          .reduce((sum, l) => sum + l.lots, 0);
+                        const maxAllowed = lots - sumOfOthers;
+                        const cappedValue = Math.min(value, maxAllowed);
+                        
+                        // Store the slider value temporarily during drag
+                        setCreationLotSliders(prev => ({
+                          ...prev,
+                          [level.id]: cappedValue
+                        }));
                       }}
                       onPointerUp={() => {
-                        // Value is already updated via onValueChange
+                        // Commit the final value on pointer up
+                        const sliderValue = creationLotSliders[level.id] ?? level.lots;
+                        const newLevels = [...creationTpLevels];
+                        newLevels[idx] = { ...level, lots: sliderValue };
+                        setCreationTpLevels(newLevels);
                       }}
                       className="w-full"
+                      showValueTooltip
+                      formatValue={formatLotValue}
                     />
                   </div>
                   <div className="w-[2.5rem]"></div>
@@ -664,14 +812,34 @@ export function PlaceTradesCard({
                     <span className="text-xs font-semibold whitespace-nowrap">#{idx + 1}</span>
                     <Input
                       type="text"
-                      value={level.price.toFixed(5)}
+                      value={creationSlPriceInputs[level.id] !== undefined ? creationSlPriceInputs[level.id] : level.price.toFixed(5)}
                       onChange={(e) => {
-                        const newPrice = parseFloat(e.target.value);
+                        setCreationSlPriceInputs(prev => ({
+                          ...prev,
+                          [level.id]: e.target.value
+                        }));
+                      }}
+                      onBlur={(e) => {
+                        const inputValue = e.target.value;
+                        if (inputValue === "") {
+                          setCreationSlPriceInputs(prev => {
+                            const updated = { ...prev };
+                            delete updated[level.id];
+                            return updated;
+                          });
+                          return;
+                        }
+                        const newPrice = parseFloat(inputValue);
                         if (!isNaN(newPrice) && newPrice > 0) {
                           const newLevels = [...creationSlLevels];
                           newLevels[idx] = { ...level, price: newPrice };
                           setCreationSlLevels(newLevels);
                         }
+                        setCreationSlPriceInputs(prev => {
+                          const updated = { ...prev };
+                          delete updated[level.id];
+                          return updated;
+                        });
                       }}
                       className="h-5 text-xs px-1 py-0 w-16"
                     />
@@ -685,6 +853,21 @@ export function PlaceTradesCard({
                           [level.id]: value[0]
                         }));
                       }}
+                      onPointerDown={() => {
+                        setDragBasePrice(effectivePrice);
+                        setDragBaseSide(side);
+                        setIsPriceDragging(true);
+                      }}
+                      onPointerCancel={() => {
+                        setDragBasePrice(null);
+                        setDragBaseSide(null);
+                        setIsPriceDragging(false);
+                      }}
+                      onLostPointerCapture={() => {
+                        setDragBasePrice(null);
+                        setDragBaseSide(null);
+                        setIsPriceDragging(false);
+                      }}
                       onPointerUp={() => {
                         const sliderValue = creationSliders[level.id] ?? 33.33;
                         const actualPercent = sliderToPercent(sliderValue);
@@ -692,11 +875,16 @@ export function PlaceTradesCard({
                         const newLevels = [...creationSlLevels];
                         newLevels[idx] = { ...level, price: newPrice };
                         setCreationSlLevels(newLevels);
+                        setDragBasePrice(null);
+                        setDragBaseSide(null);
+                        setIsPriceDragging(false);
                       }}
                       min={0}
                       max={100}
                       step={0.1}
                       className="w-full"
+                      showValueTooltip
+                      formatValue={formatCreationSlPrice}
                     />
                   </div>
                   <div className="w-[2.5rem] text-right">
@@ -726,12 +914,39 @@ export function PlaceTradesCard({
                   <div className="flex items-center gap-0.5 w-[4.5rem]">
                     <Input
                       type="text"
-                      value={level.lots.toFixed(2)}
+                      value={creationSlLotsInputs[level.id] !== undefined ? creationSlLotsInputs[level.id] : level.lots.toFixed(2)}
                       onChange={(e) => {
-                        const newLots = Math.min(lots, Math.max(0.01, parseFloat(e.target.value) || 0));
+                        setCreationSlLotsInputs(prev => ({
+                          ...prev,
+                          [level.id]: e.target.value
+                        }));
+                      }}
+                      onBlur={(e) => {
+                        const inputValue = e.target.value;
+                        if (inputValue === "") {
+                          setCreationSlLotsInputs(prev => {
+                            const updated = { ...prev };
+                            delete updated[level.id];
+                            return updated;
+                          });
+                          return;
+                        }
+                        const sumOfOthers = creationSlLevels
+                          .filter(l => l.id !== level.id)
+                          .reduce((sum, l) => sum + l.lots, 0);
+                        const maxAllowed = lots - sumOfOthers;
+                        const newLots = Math.min(lots, Math.max(0.01, parseFloat(inputValue) || 0.01));
+                        const cappedLots = Math.min(newLots, maxAllowed);
+                        
                         const newLevels = [...creationSlLevels];
-                        newLevels[idx] = { ...level, lots: newLots };
+                        newLevels[idx] = { ...level, lots: cappedLots };
                         setCreationSlLevels(newLevels);
+                        
+                        setCreationSlLotsInputs(prev => {
+                          const updated = { ...prev };
+                          delete updated[level.id];
+                          return updated;
+                        });
                       }}
                       className="h-5 text-xs px-1 py-0 w-10"
                     />
@@ -739,19 +954,34 @@ export function PlaceTradesCard({
                   </div>
                   <div className="flex-1 min-w-0">
                     <Slider
-                      value={[level.lots]}
+                      value={[creationLotSliders[level.id] ?? level.lots]}
                       min={0.01}
-                      max={getRemainingLots(creationSlLevels, lots) + level.lots}
+                      max={getMaxLotsForLevel(creationSlLevels, lots, level.id)}
                       step={0.01}
                       onValueChange={([value]) => {
-                        const newLevels = [...creationSlLevels];
-                        newLevels[idx] = { ...level, lots: value };
-                        setCreationSlLevels(newLevels);
+                        // Validate that sum doesn't exceed total lots
+                        const sumOfOthers = creationSlLevels
+                          .filter(l => l.id !== level.id)
+                          .reduce((sum, l) => sum + l.lots, 0);
+                        const maxAllowed = lots - sumOfOthers;
+                        const cappedValue = Math.min(value, maxAllowed);
+                        
+                        // Store the slider value temporarily during drag
+                        setCreationLotSliders(prev => ({
+                          ...prev,
+                          [level.id]: cappedValue
+                        }));
                       }}
                       onPointerUp={() => {
-                        // Value is already updated via onValueChange
+                        // Commit the final value on pointer up
+                        const sliderValue = creationLotSliders[level.id] ?? level.lots;
+                        const newLevels = [...creationSlLevels];
+                        newLevels[idx] = { ...level, lots: sliderValue };
+                        setCreationSlLevels(newLevels);
                       }}
                       className="w-full"
+                      showValueTooltip
+                      formatValue={formatLotValue}
                     />
                   </div>
                   <div className="w-[2.5rem]"></div>
@@ -883,12 +1113,32 @@ export function PlaceTradesCard({
                                 <Input
                                   type="text"
                                   disabled={level.locked}
-                                  value={level.price.toFixed(5)}
+                                  value={tradeTpPriceInputs[trade.id]?.[level.id] !== undefined ? tradeTpPriceInputs[trade.id]?.[level.id] : level.price.toFixed(5)}
                                   onChange={(e) => {
-                                    const newPrice = parseFloat(e.target.value);
+                                    setTradeTpPriceInputs(prev => ({
+                                      ...prev,
+                                      [trade.id]: { ...prev[trade.id], [level.id]: e.target.value }
+                                    }));
+                                  }}
+                                  onBlur={(e) => {
+                                    const inputValue = e.target.value;
+                                    if (inputValue === "") {
+                                      setTradeTpPriceInputs(prev => {
+                                        const tradeLevelInputs = { ...prev[trade.id] };
+                                        delete tradeLevelInputs[level.id];
+                                        return { ...prev, [trade.id]: tradeLevelInputs };
+                                      });
+                                      return;
+                                    }
+                                    const newPrice = parseFloat(inputValue);
                                     if (!isNaN(newPrice) && newPrice > 0 && isValidSlTpPrice(trade, "tp", newPrice)) {
                                       onTradePriceUpdate?.(trade.id, "tp", level.id, newPrice, false);
                                     }
+                                    setTradeTpPriceInputs(prev => {
+                                      const tradeLevelInputs = { ...prev[trade.id] };
+                                      delete tradeLevelInputs[level.id];
+                                      return { ...prev, [trade.id]: tradeLevelInputs };
+                                    });
                                   }}
                                   className="h-5 text-xs px-1 py-0 w-16"
                                 />
@@ -923,6 +1173,8 @@ export function PlaceTradesCard({
                                   max={100}
                                   step={0.1}
                                   className="w-full"
+                                  showValueTooltip
+                                  formatValue={createTradePriceFormatter(trade.entryPrice, trade.side, "tp")}
                                 />
                               </div>
                               <div className="flex items-center gap-0.5">
@@ -970,10 +1222,37 @@ export function PlaceTradesCard({
                                 <Input
                                   type="text"
                                   disabled={level.locked}
-                                  value={level.lots.toFixed(2)}
+                                  value={tradeTpLotsInputs[trade.id]?.[level.id] !== undefined ? tradeTpLotsInputs[trade.id]?.[level.id] : level.lots.toFixed(2)}
                                   onChange={(e) => {
-                                    const newLots = Math.min(trade.lots, Math.max(0.01, parseFloat(e.target.value) || 0));
-                                    onUpdateLevelLots?.(trade.id, "tp", level.id, newLots);
+                                    setTradeTpLotsInputs(prev => ({
+                                      ...prev,
+                                      [trade.id]: { ...prev[trade.id], [level.id]: e.target.value }
+                                    }));
+                                  }}
+                                  onBlur={(e) => {
+                                    const inputValue = e.target.value;
+                                    if (inputValue === "") {
+                                      setTradeTpLotsInputs(prev => {
+                                        const tradeLevelInputs = { ...prev[trade.id] };
+                                        delete tradeLevelInputs[level.id];
+                                        return { ...prev, [trade.id]: tradeLevelInputs };
+                                      });
+                                      return;
+                                    }
+                                    const sumOfOthers = trade.takeProfitLevels
+                                      .filter(l => l.id !== level.id)
+                                      .reduce((sum, l) => sum + l.lots, 0);
+                                    const maxAllowed = trade.lots - sumOfOthers;
+                                    const newLots = Math.min(trade.lots, Math.max(0.01, parseFloat(inputValue) || 0.01));
+                                    const cappedLots = Math.min(newLots, maxAllowed);
+                                    
+                                    onUpdateLevelLots?.(trade.id, "tp", level.id, cappedLots);
+                                    
+                                    setTradeTpLotsInputs(prev => {
+                                      const tradeLevelInputs = { ...prev[trade.id] };
+                                      delete tradeLevelInputs[level.id];
+                                      return { ...prev, [trade.id]: tradeLevelInputs };
+                                    });
                                   }}
                                   className="h-5 text-xs px-1 py-0 w-10"
                                 />
@@ -982,18 +1261,37 @@ export function PlaceTradesCard({
                               <div className="flex-1 min-w-0">
                                 <Slider
                                   disabled={level.locked}
-                                  value={[level.lots]}
+                                  value={[tradeLotSliders[trade.id]?.[level.id] ?? level.lots]}
                                   min={0.01}
-                                  max={getRemainingLots(trade.takeProfitLevels, trade.lots) + level.lots}
+                                  max={getMaxLotsForLevel(trade.takeProfitLevels, trade.lots, level.id)}
                                   step={0.01}
                                   onValueChange={([value]) => {
                                     if (level.locked) return;
-                                    onUpdateLevelLots?.(trade.id, "tp", level.id, value);
+                                    // Validate that sum doesn't exceed total lots
+                                    const sumOfOthers = trade.takeProfitLevels
+                                      .filter(l => l.id !== level.id)
+                                      .reduce((sum, l) => sum + l.lots, 0);
+                                    const maxAllowed = trade.lots - sumOfOthers;
+                                    const cappedValue = Math.min(value, maxAllowed);
+                                    
+                                    // Store the slider value temporarily during drag
+                                    setTradeLotSliders(prev => ({
+                                      ...prev,
+                                      [trade.id]: {
+                                        ...prev[trade.id],
+                                        [level.id]: cappedValue
+                                      }
+                                    }));
                                   }}
                                   onPointerUp={() => {
-                                    // Value is already updated via onValueChange
+                                    if (level.locked) return;
+                                    // Commit the final value on pointer up
+                                    const sliderValue = tradeLotSliders[trade.id]?.[level.id] ?? level.lots;
+                                    onUpdateLevelLots?.(trade.id, "tp", level.id, sliderValue);
                                   }}
                                   className="w-full"
+                                  showValueTooltip
+                                  formatValue={(val) => `${val.toFixed(2)} lots`}
                                 />
                               </div>
                               <div className="w-[2.5rem]"></div>
@@ -1036,12 +1334,32 @@ export function PlaceTradesCard({
                                 <Input
                                   type="text"
                                   disabled={level.locked}
-                                  value={level.price.toFixed(5)}
+                                  value={tradeSlPriceInputs[trade.id]?.[level.id] !== undefined ? tradeSlPriceInputs[trade.id]?.[level.id] : level.price.toFixed(5)}
                                   onChange={(e) => {
-                                    const newPrice = parseFloat(e.target.value);
+                                    setTradeSlPriceInputs(prev => ({
+                                      ...prev,
+                                      [trade.id]: { ...prev[trade.id], [level.id]: e.target.value }
+                                    }));
+                                  }}
+                                  onBlur={(e) => {
+                                    const inputValue = e.target.value;
+                                    if (inputValue === "") {
+                                      setTradeSlPriceInputs(prev => {
+                                        const tradeLevelInputs = { ...prev[trade.id] };
+                                        delete tradeLevelInputs[level.id];
+                                        return { ...prev, [trade.id]: tradeLevelInputs };
+                                      });
+                                      return;
+                                    }
+                                    const newPrice = parseFloat(inputValue);
                                     if (!isNaN(newPrice) && newPrice > 0 && isValidSlTpPrice(trade, "sl", newPrice)) {
                                       onTradePriceUpdate?.(trade.id, "sl", level.id, newPrice, false);
                                     }
+                                    setTradeSlPriceInputs(prev => {
+                                      const tradeLevelInputs = { ...prev[trade.id] };
+                                      delete tradeLevelInputs[level.id];
+                                      return { ...prev, [trade.id]: tradeLevelInputs };
+                                    });
                                   }}
                                   className="h-5 text-xs px-1 py-0 w-16"
                                 />
@@ -1076,6 +1394,8 @@ export function PlaceTradesCard({
                                   max={100}
                                   step={0.1}
                                   className="w-full"
+                                  showValueTooltip
+                                  formatValue={createTradePriceFormatter(trade.entryPrice, trade.side, "sl")}
                                 />
                               </div>
                               <div className="flex items-center gap-0.5">
@@ -1123,10 +1443,37 @@ export function PlaceTradesCard({
                                 <Input
                                   type="text"
                                   disabled={level.locked}
-                                  value={level.lots.toFixed(2)}
+                                  value={tradeSlLotsInputs[trade.id]?.[level.id] !== undefined ? tradeSlLotsInputs[trade.id]?.[level.id] : level.lots.toFixed(2)}
                                   onChange={(e) => {
-                                    const newLots = Math.min(trade.lots, Math.max(0.01, parseFloat(e.target.value) || 0));
-                                    onUpdateLevelLots?.(trade.id, "sl", level.id, newLots);
+                                    setTradeSlLotsInputs(prev => ({
+                                      ...prev,
+                                      [trade.id]: { ...prev[trade.id], [level.id]: e.target.value }
+                                    }));
+                                  }}
+                                  onBlur={(e) => {
+                                    const inputValue = e.target.value;
+                                    if (inputValue === "") {
+                                      setTradeSlLotsInputs(prev => {
+                                        const tradeLevelInputs = { ...prev[trade.id] };
+                                        delete tradeLevelInputs[level.id];
+                                        return { ...prev, [trade.id]: tradeLevelInputs };
+                                      });
+                                      return;
+                                    }
+                                    const sumOfOthers = trade.stopLossLevels
+                                      .filter(l => l.id !== level.id)
+                                      .reduce((sum, l) => sum + l.lots, 0);
+                                    const maxAllowed = trade.lots - sumOfOthers;
+                                    const newLots = Math.min(trade.lots, Math.max(0.01, parseFloat(inputValue) || 0.01));
+                                    const cappedLots = Math.min(newLots, maxAllowed);
+                                    
+                                    onUpdateLevelLots?.(trade.id, "sl", level.id, cappedLots);
+                                    
+                                    setTradeSlLotsInputs(prev => {
+                                      const tradeLevelInputs = { ...prev[trade.id] };
+                                      delete tradeLevelInputs[level.id];
+                                      return { ...prev, [trade.id]: tradeLevelInputs };
+                                    });
                                   }}
                                   className="h-5 text-xs px-1 py-0 w-10"
                                 />
@@ -1135,18 +1482,37 @@ export function PlaceTradesCard({
                               <div className="flex-1 min-w-0">
                                 <Slider
                                   disabled={level.locked}
-                                  value={[level.lots]}
+                                  value={[tradeLotSliders[trade.id]?.[level.id] ?? level.lots]}
                                   min={0.01}
-                                  max={getRemainingLots(trade.stopLossLevels, trade.lots) + level.lots}
+                                  max={getMaxLotsForLevel(trade.stopLossLevels, trade.lots, level.id)}
                                   step={0.01}
                                   onValueChange={([value]) => {
                                     if (level.locked) return;
-                                    onUpdateLevelLots?.(trade.id, "sl", level.id, value);
+                                    // Validate that sum doesn't exceed total lots
+                                    const sumOfOthers = trade.stopLossLevels
+                                      .filter(l => l.id !== level.id)
+                                      .reduce((sum, l) => sum + l.lots, 0);
+                                    const maxAllowed = trade.lots - sumOfOthers;
+                                    const cappedValue = Math.min(value, maxAllowed);
+                                    
+                                    // Store the slider value temporarily during drag
+                                    setTradeLotSliders(prev => ({
+                                      ...prev,
+                                      [trade.id]: {
+                                        ...prev[trade.id],
+                                        [level.id]: cappedValue
+                                      }
+                                    }));
                                   }}
                                   onPointerUp={() => {
-                                    // Value is already updated via onValueChange
+                                    if (level.locked) return;
+                                    // Commit the final value on pointer up
+                                    const sliderValue = tradeLotSliders[trade.id]?.[level.id] ?? level.lots;
+                                    onUpdateLevelLots?.(trade.id, "sl", level.id, sliderValue);
                                   }}
                                   className="w-full"
+                                  showValueTooltip
+                                  formatValue={(val) => `${val.toFixed(2)} lots`}
                                 />
                               </div>
                               <div className="w-[2.5rem]"></div>
@@ -1188,7 +1554,7 @@ export function PlaceTradesCard({
                             className="h-6 text-xs flex-1"
                             onClick={() => {
                               const price = calculateSlTpPrice(trade.entryPrice, trade.side, "sl", 1);
-                              onAddLevel?.(trade.id, "sl", price, 100);
+                              onAddLevel?.(trade.id, "sl", price, getRemainingLots(trade.stopLossLevels, trade.lots));
                             }}
                           >
                             Add SL
@@ -1202,7 +1568,7 @@ export function PlaceTradesCard({
                             className="h-6 text-xs flex-1"
                             onClick={() => {
                               const price = calculateSlTpPrice(trade.entryPrice, trade.side, "tp", 1);
-                              onAddLevel?.(trade.id, "tp", price, 100);
+                              onAddLevel?.(trade.id, "tp", price, getRemainingLots(trade.takeProfitLevels, trade.lots));
                             }}
                           >
                             Add TP

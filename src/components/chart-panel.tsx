@@ -89,6 +89,26 @@ type TradeLines = {
   tpLevels: Map<string, IPriceLine>;  // levelId -> price line
 };
 
+const formatLotsLabel = (lots: number) => ` [${lots.toFixed(2)} lots]`;
+const shouldShowLotsLabel = (levelLots: number, totalLots: number): boolean => {
+  const EPSILON = 0.0001;
+  return totalLots > 0 && Math.abs(levelLots - totalLots) > EPSILON;
+};
+const formatLotsLabelForTotal = (levelLots: number, totalLots: number): string =>
+  (shouldShowLotsLabel(levelLots, totalLots) ? formatLotsLabel(levelLots) : "");
+
+const getLineWidthForLots = (
+  levelLots: number,
+  totalLots: number,
+  locked: boolean,
+): 1 | 2 | 3 | 4 => {
+  if (totalLots <= 0 || levelLots <= 0) return locked ? 3 : 1;
+  const ratio = Math.min(1, Math.max(0, levelLots / totalLots));
+  const baseWidth = Math.round(1 + 3 * Math.sqrt(ratio));
+  const width = locked ? Math.max(3, baseWidth + 1) : baseWidth;
+  return Math.min(4, Math.max(1, width)) as 1 | 2 | 3 | 4;
+};
+
 export function ChartPanel({
   onPriceChange,
   trades = [],
@@ -674,14 +694,15 @@ export function ChartPanel({
             dragTarget?.type === "sl" && 
             'levelId' in dragTarget && 
             dragTarget.levelId === level.id;
+          const lineWidth = getLineWidthForLots(level.lots, trade.lots, !!level.locked);
           
           if (existingLine) {
             const options: any = {
               lineVisible: trade.visible,
               axisLabelVisible: trade.visible,
-              lineWidth: level.locked ? 3 : 2,
+              lineWidth,
               lineStyle: level.locked ? LineStyle.Dashed : LineStyle.Dotted,
-              title: `#${displayIndex} SL${trade.stopLossLevels.length > 1 ? levelIndex + 1 : ""}`,
+              title: `#${displayIndex} SL${trade.stopLossLevels.length > 1 ? levelIndex + 1 : ""}${formatLotsLabelForTotal(level.lots, trade.lots)}`,
             };
             if (!isDraggingThisLevel) {
               options.price = level.price;
@@ -691,11 +712,11 @@ export function ChartPanel({
             const newLine = series.createPriceLine({
               price: level.price,
               color: trade.color,
-              lineWidth: level.locked ? 3 : 2,
+              lineWidth,
               lineStyle: level.locked ? LineStyle.Dashed : LineStyle.Dotted,
               lineVisible: trade.visible,
               axisLabelVisible: true,
-              title: `#${displayIndex} SL${trade.stopLossLevels.length > 1 ? levelIndex + 1 : ""}`,
+              title: `#${displayIndex} SL${trade.stopLossLevels.length > 1 ? levelIndex + 1 : ""}${formatLotsLabelForTotal(level.lots, trade.lots)}`,
             });
             existingLines.slLevels.set(level.id, newLine);
           }
@@ -719,14 +740,15 @@ export function ChartPanel({
             dragTarget?.type === "tp" && 
             'levelId' in dragTarget && 
             dragTarget.levelId === level.id;
+          const lineWidth = getLineWidthForLots(level.lots, trade.lots, !!level.locked);
           
           if (existingLine) {
             const options: any = {
               lineVisible: trade.visible,
               axisLabelVisible: trade.visible,
-              lineWidth: level.locked ? 3 : 2,
+              lineWidth,
               lineStyle: level.locked ? LineStyle.Dashed : LineStyle.Dotted,
-              title: `#${displayIndex} TP${trade.takeProfitLevels.length > 1 ? levelIndex + 1 : ""}`,
+              title: `#${displayIndex} TP${trade.takeProfitLevels.length > 1 ? levelIndex + 1 : ""}${formatLotsLabelForTotal(level.lots, trade.lots)}`,
             };
             if (!isDraggingThisLevel) {
               options.price = level.price;
@@ -736,11 +758,11 @@ export function ChartPanel({
             const newLine = series.createPriceLine({
               price: level.price,
               color: trade.color,
-              lineWidth: level.locked ? 3 : 2,
+              lineWidth,
               lineStyle: level.locked ? LineStyle.Dashed : LineStyle.Dotted,
               lineVisible: trade.visible,
               axisLabelVisible: true,
-              title: `#${displayIndex} TP${trade.takeProfitLevels.length > 1 ? levelIndex + 1 : ""}`,
+              title: `#${displayIndex} TP${trade.takeProfitLevels.length > 1 ? levelIndex + 1 : ""}${formatLotsLabelForTotal(level.lots, trade.lots)}`,
             });
             existingLines.tpLevels.set(level.id, newLine);
           }
@@ -759,28 +781,30 @@ export function ChartPanel({
 
         const slLevels = new Map<string, IPriceLine>();
         trade.stopLossLevels.forEach((level, levelIndex) => {
+          const lineWidth = getLineWidthForLots(level.lots, trade.lots, !!level.locked);
           const line = series.createPriceLine({
             price: level.price,
             color: trade.color,
-            lineWidth: level.locked ? 3 : 2,
+            lineWidth,
             lineStyle: level.locked ? LineStyle.Dashed : LineStyle.Dotted,
             lineVisible: trade.visible,
             axisLabelVisible: true,
-            title: `#${displayIndex} SL${trade.stopLossLevels.length > 1 ? levelIndex + 1 : ""}`,
+            title: `#${displayIndex} SL${trade.stopLossLevels.length > 1 ? levelIndex + 1 : ""}${formatLotsLabelForTotal(level.lots, trade.lots)}`,
           });
           slLevels.set(level.id, line);
         });
 
         const tpLevels = new Map<string, IPriceLine>();
         trade.takeProfitLevels.forEach((level, levelIndex) => {
+          const lineWidth = getLineWidthForLots(level.lots, trade.lots, !!level.locked);
           const line = series.createPriceLine({
             price: level.price,
             color: trade.color,
-            lineWidth: level.locked ? 3 : 2,
+            lineWidth,
             lineStyle: level.locked ? LineStyle.Dashed : LineStyle.Dotted,
             lineVisible: trade.visible,
             axisLabelVisible: true,
-            title: `#${displayIndex} TP${trade.takeProfitLevels.length > 1 ? levelIndex + 1 : ""}`,
+            title: `#${displayIndex} TP${trade.takeProfitLevels.length > 1 ? levelIndex + 1 : ""}${formatLotsLabelForTotal(level.lots, trade.lots)}`,
           });
           tpLevels.set(level.id, line);
         });
@@ -813,16 +837,22 @@ export function ChartPanel({
       const newLines: IPriceLine[] = [];
       const newMeta: Array<{ type: "sl" | "tp"; levelIndex: number }> = [];
 
+      const previewTotalLots = previewTrade.stopLossLevels.reduce((sum, level) => sum + level.lots, 0)
+        + previewTrade.takeProfitLevels.reduce((sum, level) => sum + level.lots, 0);
+
       // Stop loss lines - Red with level numbers
       previewTrade.stopLossLevels.forEach((level, index) => {
+        const lineWidth = getLineWidthForLots(level.lots, previewTotalLots, !!level.locked);
         const slLine = series.createPriceLine({
           price: level.price,
           color: "#ef4444",
-          lineWidth: 2,
+          lineWidth,
           lineStyle: LineStyle.Solid,
           lineVisible: true,
           axisLabelVisible: true,
-          title: previewTrade.stopLossLevels.length > 1 ? `SL${index + 1} (Preview)` : "SL (Preview)",
+          title: previewTrade.stopLossLevels.length > 1
+            ? `SL${index + 1}${formatLotsLabelForTotal(level.lots, previewTotalLots)} (Preview)`
+            : `SL${formatLotsLabelForTotal(level.lots, previewTotalLots)} (Preview)`,
         });
         newLines.push(slLine);
         newMeta.push({ type: "sl", levelIndex: index });
@@ -830,14 +860,17 @@ export function ChartPanel({
 
       // Take profit lines - Green with level numbers
       previewTrade.takeProfitLevels.forEach((level, index) => {
+        const lineWidth = getLineWidthForLots(level.lots, previewTotalLots, !!level.locked);
         const tpLine = series.createPriceLine({
           price: level.price,
           color: "#10b981",
-          lineWidth: 2,
+          lineWidth,
           lineStyle: LineStyle.Solid,
           lineVisible: true,
           axisLabelVisible: true,
-          title: previewTrade.takeProfitLevels.length > 1 ? `TP${index + 1} (Preview)` : "TP (Preview)",
+          title: previewTrade.takeProfitLevels.length > 1
+            ? `TP${index + 1}${formatLotsLabelForTotal(level.lots, previewTotalLots)} (Preview)`
+            : `TP${formatLotsLabelForTotal(level.lots, previewTotalLots)} (Preview)`,
         });
         newLines.push(tpLine);
         newMeta.push({ type: "tp", levelIndex: index });
